@@ -135,18 +135,58 @@ function tmuxSessionExists() {
   }
 }
 
-// Check if tmux window exists
+// Check if tmux window exists (without switching to it)
 function tmuxWindowExists(windowName) {
   try {
-    execSync(`tmux select-window -t ${TMUX_SESSION}:${windowName}`, { stdio: 'ignore' });
-    return true;
+    const windows = execSync(`tmux list-windows -t ${TMUX_SESSION} -F '#{window_name}'`, { encoding: 'utf-8' });
+    return windows.split('\n').includes(windowName);
   } catch {
     return false;
   }
 }
 
+// Capture tmux pane content
+function capturePaneContent(windowName) {
+  try {
+    return execSync(`tmux capture-pane -t ${TMUX_SESSION}:${windowName} -p`, { encoding: 'utf-8' });
+  } catch {
+    return '';
+  }
+}
+
+// Wait for Claude to be ready (shows prompt after trust prompt is confirmed)
+async function waitForClaudeReady(windowName, maxWaitMs = 15000) {
+  const startTime = Date.now();
+  const pollInterval = 300;
+
+  while (Date.now() - startTime < maxWaitMs) {
+    const content = capturePaneContent(windowName);
+
+    // Skip if still showing trust prompt (waiting for confirmation)
+    if (content.includes('trust this folder') || content.includes('Yes, I trust')) {
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
+      continue;
+    }
+
+    // Check for ready indicators (after trust is confirmed)
+    if (content.includes('Welcome') ||      // "Welcome back" or "Welcome to Claude"
+        content.includes('❯') ||            // Prompt ready
+        content.includes('What would you like to do?')) {  // Initial prompt
+      console.log(`[${new Date().toISOString()}] Claude ready in window ${windowName}`);
+      // Wait 200ms more for UI to stabilize before sending input
+      await new Promise(resolve => setTimeout(resolve, 200));
+      return true;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, pollInterval));
+  }
+
+  console.log(`[${new Date().toISOString()}] Timeout waiting for Claude in window ${windowName}`);
+  return false;
+}
+
 // Send text to a tmux window
-function sendToWindow(windowName, text) {
+async function sendToWindow(windowName, text) {
   // Check if this is an option selection
   if (isOptionSelection(text)) {
     const key = getOptionKey(text);
@@ -158,16 +198,17 @@ function sendToWindow(windowName, text) {
   }
 
   const escaped = text.replace(/'/g, "'\\''");
+  console.log(`[${new Date().toISOString()}] Sending to ${windowName}: "${text.substring(0, 50)}..."`);
   execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} -l '${escaped}'`);
   execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} Enter`);
-  // Send second Enter for paste mode handling
-  setTimeout(() => {
-    try {
-      execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} Enter`);
-    } catch (e) {
-      // Window may have closed
-    }
-  }, 100);
+  // Wait and send second Enter for paste mode handling
+  await new Promise(resolve => setTimeout(resolve, 100));
+  try {
+    execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} Enter`);
+    console.log(`[${new Date().toISOString()}] Message sent successfully to ${windowName}`);
+  } catch (e) {
+    console.log(`[${new Date().toISOString()}] Error sending second Enter: ${e.message}`);
+  }
 }
 
 // Check if text is an option selection (single digit, "yes", "no", "y", "n")
@@ -230,8 +271,11 @@ async function createSession(threadTs, channel, workingDir) {
   // Use temporary window name until Claude reports its session_id
   const tempWindowName = `new-${windowIndex++}`;
 
-  // Create new tmux window
-  execSync(`tmux new-window -t ${TMUX_SESSION}: -n ${tempWindowName}`);
+  // Create new tmux window (in background)
+  execSync(`tmux new-window -d -t ${TMUX_SESSION}: -n ${tempWindowName}`);
+
+  // Small delay to ensure window is fully created
+  await new Promise(resolve => setTimeout(resolve, 100));
 
   // Change to working directory first (use double quotes for paths with spaces)
   if (workingDir) {
@@ -266,8 +310,11 @@ async function createSession(threadTs, channel, workingDir) {
 async function resurrectSession(threadTs, channel, fullSessionId, workingDir) {
   const tempWindowName = `new-${windowIndex++}`;
 
-  // Create new tmux window
-  execSync(`tmux new-window -t ${TMUX_SESSION}: -n ${tempWindowName}`);
+  // Create new tmux window (in background)
+  execSync(`tmux new-window -d -t ${TMUX_SESSION}: -n ${tempWindowName}`);
+
+  // Small delay to ensure window is fully created
+  await new Promise(resolve => setTimeout(resolve, 100));
 
   // Change to working directory (use stored dir from original session)
   const sessions = loadSessions();
@@ -496,6 +543,9 @@ async function handleMessage(message, channel, say) {
     }
   }
 
+  // Check if session was just created (need to wait for trust prompt)
+  const isNewSession = session.status === 'starting';
+
   // Update activity timestamp
   session.last_activity = new Date().toISOString();
   session.idle_since = null;
@@ -505,10 +555,107 @@ async function handleMessage(message, channel, say) {
 
   // Send message to appropriate tmux window
   console.log(`[${new Date().toISOString()}] Routing message to window ${session.window}: ${messageText.substring(0, 50)}...`);
-  sendToWindow(session.window, messageText);
+
+  if (isNewSession) {
+    // Wait for Claude to start and show prompt
+    console.log(`[${new Date().toISOString()}] New session - waiting for Claude to be ready...`);
+    await waitForClaudeReady(session.window);
+    // Log what we see before sending
+    const paneContent = capturePaneContent(session.window);
+    console.log(`[${new Date().toISOString()}] Pane content before send:\n${paneContent.slice(-500)}`);
+  }
+
+  await sendToWindow(session.window, messageText);
 
   // Add eyes reaction
   await addReaction(channel, message.ts, 'eyes');
+}
+
+// ============================================
+// Bot Commands (via DM)
+// ============================================
+
+async function handleBotCommand(text, channel, say) {
+  const cmd = text.toLowerCase();
+
+  // !sessions - List active sessions
+  if (cmd === '!sessions' || cmd === '!s') {
+    const sessions = loadSessions();
+    const activeSessions = Object.entries(sessions).filter(([_, s]) => s.status !== 'terminated');
+
+    if (activeSessions.length === 0) {
+      await say(':information_source: No active sessions.');
+      return true;
+    }
+
+    const now = new Date();
+    const lines = activeSessions.map(([threadTs, s]) => {
+      const idleTime = s.idle_since ? Math.round((now - new Date(s.idle_since)) / 1000) : 0;
+      const statusEmoji = s.status === 'idle' ? ':zzz:' : s.status === 'starting' ? ':hourglass:' : ':green_circle:';
+      const idleStr = s.status === 'idle' ? ` (idle ${idleTime}s)` : '';
+      const dir = s.workingDir?.replace(process.env.HOME, '~') || '~';
+      return `${statusEmoji} \`${s.window}\` - ${dir}${idleStr}`;
+    });
+
+    await say(`:clipboard: *Active Sessions (${activeSessions.length}/${config.multiSession.maxConcurrent})*\n${lines.join('\n')}`);
+    return true;
+  }
+
+  // !status - Show bridge status
+  if (cmd === '!status') {
+    const sessions = loadSessions();
+    const active = Object.values(sessions).filter(s => s.status !== 'terminated').length;
+    const idle = Object.values(sessions).filter(s => s.status === 'idle').length;
+    const terminated = Object.values(sessions).filter(s => s.status === 'terminated').length;
+    const tmuxOk = tmuxSessionExists() ? ':white_check_mark:' : ':x:';
+
+    await say(
+      `:robot_face: *Claude Code Bridge Status*\n` +
+      `• tmux session \`${TMUX_SESSION}\`: ${tmuxOk}\n` +
+      `• Active sessions: ${active}/${config.multiSession.maxConcurrent}\n` +
+      `• Idle sessions: ${idle}\n` +
+      `• Terminated (can resurrect): ${terminated}\n` +
+      `• Idle timeout: ${config.multiSession.idleTimeoutMinutes} minutes`
+    );
+    return true;
+  }
+
+  // !kill <window> - Terminate a session
+  if (cmd.startsWith('!kill ')) {
+    const windowName = text.slice(6).trim();
+    if (!windowName) {
+      await say(':warning: Usage: `!kill <window-name>`\nUse `!sessions` to see active windows.');
+      return true;
+    }
+
+    const sessions = loadSessions();
+    const entry = Object.entries(sessions).find(([_, s]) => s.window === windowName && s.status !== 'terminated');
+
+    if (!entry) {
+      await say(`:warning: Session \`${windowName}\` not found or already terminated.`);
+      return true;
+    }
+
+    const [threadTs, session] = entry;
+    terminateSession(threadTs, session);
+    await say(`:skull: Session \`${windowName}\` terminated.`);
+    return true;
+  }
+
+  // !help - Show available commands
+  if (cmd === '!help' || cmd === '!h') {
+    await say(
+      `:information_source: *Bot Commands*\n` +
+      `• \`!sessions\` or \`!s\` - List active sessions\n` +
+      `• \`!status\` - Show bridge status\n` +
+      `• \`!kill <window>\` - Terminate a session\n` +
+      `• \`!help\` - Show this help\n\n` +
+      `To start a Claude session, just send a message (creates new thread).`
+    );
+    return true;
+  }
+
+  return false; // Not a recognized command
 }
 
 // ============================================
@@ -531,7 +678,14 @@ app.message(async ({ message, say }) => {
   }
 
   const isThread = !!message.thread_ts;
-  console.log(`[${new Date().toISOString()}] Message from ${message.user}${isThread ? ' (in thread)' : ''}: ${message.text?.substring(0, 100) || '(empty)'}`);
+  const text = message.text?.trim() || '';
+  console.log(`[${new Date().toISOString()}] Message from ${message.user}${isThread ? ' (in thread)' : ''}: ${text.substring(0, 100) || '(empty)'}`);
+
+  // Handle bot commands (only in main conversation, not threads)
+  if (!isThread && text.startsWith('!')) {
+    const handled = await handleBotCommand(text, message.channel, say);
+    if (handled) return;
+  }
 
   await handleMessage(message, message.channel, say);
 });
