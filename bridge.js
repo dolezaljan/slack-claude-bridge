@@ -231,7 +231,7 @@ async function createSession(threadTs, channel, workingDir) {
   const tempWindowName = `new-${windowIndex++}`;
 
   // Create new tmux window
-  execSync(`tmux new-window -t ${TMUX_SESSION} -n ${tempWindowName}`);
+  execSync(`tmux new-window -t ${TMUX_SESSION}: -n ${tempWindowName}`);
 
   // Change to working directory first (use double quotes for paths with spaces)
   if (workingDir) {
@@ -241,6 +241,15 @@ async function createSession(threadTs, channel, workingDir) {
   // Start Claude in the window with environment variables (for tool isolation)
   const env = `CLAUDE_THREAD_TS=${threadTs} CLAUDE_SLACK_CHANNEL=${channel}`;
   execSync(`tmux send-keys -t ${TMUX_SESSION}:${tempWindowName} '${env} claude' Enter`);
+
+  // Auto-confirm trust prompt after Claude starts (user specified this directory)
+  setTimeout(() => {
+    try {
+      execSync(`tmux send-keys -t ${TMUX_SESSION}:${tempWindowName} '1'`);
+    } catch (e) {
+      // Window may have closed or Claude not ready yet
+    }
+  }, 2000);
 
   return {
     window: tempWindowName,  // Will be updated to 8-char session_id by hook
@@ -258,7 +267,7 @@ async function resurrectSession(threadTs, channel, fullSessionId, workingDir) {
   const tempWindowName = `new-${windowIndex++}`;
 
   // Create new tmux window
-  execSync(`tmux new-window -t ${TMUX_SESSION} -n ${tempWindowName}`);
+  execSync(`tmux new-window -t ${TMUX_SESSION}: -n ${tempWindowName}`);
 
   // Change to working directory (use stored dir from original session)
   const sessions = loadSessions();
@@ -268,6 +277,15 @@ async function resurrectSession(threadTs, channel, fullSessionId, workingDir) {
   // Resume previous Claude session using full UUID
   const env = `CLAUDE_THREAD_TS=${threadTs} CLAUDE_SLACK_CHANNEL=${channel}`;
   execSync(`tmux send-keys -t ${TMUX_SESSION}:${tempWindowName} '${env} claude --resume ${fullSessionId}' Enter`);
+
+  // Auto-confirm trust prompt if shown
+  setTimeout(() => {
+    try {
+      execSync(`tmux send-keys -t ${TMUX_SESSION}:${tempWindowName} '1'`);
+    } catch (e) {
+      // Window may have closed or Claude not ready yet
+    }
+  }, 2000);
 
   return {
     window: tempWindowName,  // Will be renamed to 8-char session_id by hook
@@ -323,6 +341,48 @@ function startCleanupInterval() {
       }
     }
   }, 60000); // Check every minute
+}
+
+// ============================================
+// Crash Detection (Health Check)
+// ============================================
+
+async function notifySessionCrashed(channel, threadTs) {
+  try {
+    await app.client.chat.postMessage({
+      channel: channel,
+      thread_ts: threadTs,
+      text: ':warning: Session ended unexpectedly. Send a message to restart.'
+    });
+  } catch (e) {
+    console.error(`Failed to notify session crash: ${e.message}`);
+  }
+}
+
+function startHealthCheckInterval() {
+  setInterval(() => {
+    const sessions = loadSessions();
+    let changed = false;
+
+    for (const [threadTs, session] of Object.entries(sessions)) {
+      // Only check non-terminated sessions
+      if (session.status === 'terminated') continue;
+
+      // Check if tmux window still exists
+      if (!tmuxWindowExists(session.window)) {
+        console.log(`[${new Date().toISOString()}] Session ${session.window} crashed (window disappeared)`);
+        sessions[threadTs].status = 'terminated';
+        changed = true;
+
+        // Notify user
+        notifySessionCrashed(session.channel, threadTs);
+      }
+    }
+
+    if (changed) {
+      saveSessions(sessions);
+    }
+  }, 30000); // Check every 30 seconds
 }
 
 // ============================================
@@ -508,22 +568,97 @@ app.event('app_mention', async ({ event, say }) => {
   await handleMessage(messageObj, event.channel, say);
 });
 
-// Slash command (optional, if you configure one)
-app.command('/claude', async ({ command, ack, respond }) => {
+// ============================================
+// Slash Commands
+// ============================================
+
+// /claude-sessions - List active sessions
+app.command('/claude-sessions', async ({ command, ack, respond }) => {
   await ack();
 
   if (config.allowedUsers && config.allowedUsers.length > 0) {
     if (!config.allowedUsers.includes(command.user_id)) {
-      await respond("Sorry, you're not authorized to control Claude Code.");
+      await respond("Sorry, you're not authorized.");
       return;
     }
   }
 
-  const text = command.text;
-  console.log(`[${new Date().toISOString()}] Command from ${command.user_id}: ${text}`);
+  const sessions = loadSessions();
+  const activeSessions = Object.entries(sessions).filter(([_, s]) => s.status !== 'terminated');
 
-  // For slash commands, we don't have thread context, so just acknowledge
-  await respond(`:information_source: Use DM or @mention in a thread to interact with Claude sessions.`);
+  if (activeSessions.length === 0) {
+    await respond(':information_source: No active sessions.');
+    return;
+  }
+
+  const now = new Date();
+  const lines = activeSessions.map(([threadTs, s]) => {
+    const idleTime = s.idle_since ? Math.round((now - new Date(s.idle_since)) / 1000) : 0;
+    const statusEmoji = s.status === 'idle' ? ':zzz:' : s.status === 'starting' ? ':hourglass:' : ':green_circle:';
+    const idleStr = s.status === 'idle' ? ` (idle ${idleTime}s)` : '';
+    const dir = s.workingDir?.replace(process.env.HOME, '~') || '~';
+    return `${statusEmoji} \`${s.window}\` - ${dir}${idleStr}`;
+  });
+
+  await respond(`:clipboard: *Active Sessions (${activeSessions.length}/${config.multiSession.maxConcurrent})*\n${lines.join('\n')}`);
+});
+
+// /claude-status - Show bridge status
+app.command('/claude-status', async ({ command, ack, respond }) => {
+  await ack();
+
+  if (config.allowedUsers && config.allowedUsers.length > 0) {
+    if (!config.allowedUsers.includes(command.user_id)) {
+      await respond("Sorry, you're not authorized.");
+      return;
+    }
+  }
+
+  const sessions = loadSessions();
+  const active = Object.values(sessions).filter(s => s.status !== 'terminated').length;
+  const idle = Object.values(sessions).filter(s => s.status === 'idle').length;
+  const terminated = Object.values(sessions).filter(s => s.status === 'terminated').length;
+
+  const tmuxOk = tmuxSessionExists() ? ':white_check_mark:' : ':x:';
+
+  await respond(
+    `:robot_face: *Claude Code Bridge Status*\n` +
+    `• tmux session \`${TMUX_SESSION}\`: ${tmuxOk}\n` +
+    `• Active sessions: ${active}/${config.multiSession.maxConcurrent}\n` +
+    `• Idle sessions: ${idle}\n` +
+    `• Terminated (can resurrect): ${terminated}\n` +
+    `• Idle timeout: ${config.multiSession.idleTimeoutMinutes} minutes`
+  );
+});
+
+// /claude-kill - Terminate a session
+app.command('/claude-kill', async ({ command, ack, respond }) => {
+  await ack();
+
+  if (config.allowedUsers && config.allowedUsers.length > 0) {
+    if (!config.allowedUsers.includes(command.user_id)) {
+      await respond("Sorry, you're not authorized.");
+      return;
+    }
+  }
+
+  const windowName = command.text.trim();
+  if (!windowName) {
+    await respond(':warning: Usage: `/claude-kill <window-name>`\nUse `/claude-sessions` to see active windows.');
+    return;
+  }
+
+  const sessions = loadSessions();
+  const entry = Object.entries(sessions).find(([_, s]) => s.window === windowName && s.status !== 'terminated');
+
+  if (!entry) {
+    await respond(`:warning: Session \`${windowName}\` not found or already terminated.`);
+    return;
+  }
+
+  const [threadTs, session] = entry;
+  terminateSession(threadTs, session);
+  await respond(`:skull: Session \`${windowName}\` terminated.`);
 });
 
 // ============================================
@@ -536,6 +671,9 @@ app.command('/claude', async ({ command, ack, respond }) => {
 
   // Start idle cleanup interval
   startCleanupInterval();
+
+  // Start crash detection health check
+  startHealthCheckInterval();
 
   // Start the Slack app
   await app.start();
