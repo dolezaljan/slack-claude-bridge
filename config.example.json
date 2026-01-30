@@ -1,0 +1,6 @@
+{
+  "botToken": "xoxb-your-bot-token",
+  "appToken": "xapp-your-app-level-token",
+  "allowedUsers": ["U12345678"],
+  "notifyChannel": "#claude-notifications"
+}
