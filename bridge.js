@@ -39,6 +39,9 @@ const app = new App({
   socketMode: true,
 });
 
+// Workspace URL for thread links (fetched at startup)
+let workspaceUrl = '';
+
 // ============================================
 // Session Management
 // ============================================
@@ -567,8 +570,12 @@ async function handleMessage(message, channel, say) {
 
   await sendToWindow(session.window, messageText);
 
-  // Add eyes reaction
+  // Add eyes reaction and track which message for removal by hook
   await addReaction(channel, message.ts, 'eyes');
+
+  // Store message_ts so hook can remove eyes on Stop
+  sessions[threadTs].lastMessageTs = message.ts;
+  saveSessions(sessions);
 }
 
 // ============================================
@@ -589,15 +596,20 @@ async function handleBotCommand(text, channel, say) {
     }
 
     const now = new Date();
-    const lines = activeSessions.map(([threadTs, s]) => {
+    await say(`:clipboard: *Active Sessions (${activeSessions.length}/${config.multiSession.maxConcurrent})*`);
+
+    for (const [threadTs, s] of activeSessions) {
       const idleTime = s.idle_since ? Math.round((now - new Date(s.idle_since)) / 1000) : 0;
       const statusEmoji = s.status === 'idle' ? ':zzz:' : s.status === 'starting' ? ':hourglass:' : ':green_circle:';
       const idleStr = s.status === 'idle' ? ` (idle ${idleTime}s)` : '';
       const dir = s.workingDir?.replace(process.env.HOME, '~') || '~';
-      return `${statusEmoji} \`${s.window}\` - ${dir}${idleStr}`;
-    });
-
-    await say(`:clipboard: *Active Sessions (${activeSessions.length}/${config.multiSession.maxConcurrent})*\n${lines.join('\n')}`);
+      // Build thread link: https://workspace.slack.com/archives/CHANNEL/pTIMESTAMP
+      const threadLink = workspaceUrl && s.channel
+        ? `<${workspaceUrl}archives/${s.channel}/p${threadTs.replace('.', '')}|→>`
+        : '';
+      await say(`${statusEmoji} ${dir}${idleStr} ${threadLink}`);
+      await say(s.window);
+    }
     return true;
   }
 
@@ -642,15 +654,53 @@ async function handleBotCommand(text, channel, say) {
     return true;
   }
 
+  // !find <query> - Find project paths
+  if (cmd.startsWith('!find ') || cmd.startsWith('!f ')) {
+    const query = text.slice(cmd.startsWith('!f ') ? 3 : 6).trim().toLowerCase();
+    if (!query) {
+      await say(':warning: Usage: `!find <name>` - Search for project directories');
+      return true;
+    }
+
+    try {
+      const home = process.env.HOME;
+
+      // Find directories with .git, package.json, Cargo.toml, go.mod, etc.
+      const result = execSync(
+        `find ~ -maxdepth 4 -type d -iname "*${query}*" 2>/dev/null | head -20`,
+        { encoding: 'utf-8', timeout: 10000 }
+      ).trim();
+
+      if (!result) {
+        await say(`:mag: No directories found matching \`${query}\``);
+        return true;
+      }
+
+      const paths = result.split('\n')
+        .map(p => p.replace(home, '~'))
+        .slice(0, 10);
+
+      await say(`:mag: Found ${paths.length} matching "${query}":`);
+      for (const p of paths) {
+        await say(p);
+      }
+    } catch (err) {
+      await say(`:warning: Search failed: ${err.message}`);
+    }
+    return true;
+  }
+
   // !help - Show available commands
   if (cmd === '!help' || cmd === '!h') {
     await say(
       `:information_source: *Bot Commands*\n` +
       `• \`!sessions\` or \`!s\` - List active sessions\n` +
       `• \`!status\` - Show bridge status\n` +
+      `• \`!find <name>\` or \`!f\` - Find project directories\n` +
       `• \`!kill <window>\` - Terminate a session\n` +
       `• \`!help\` - Show this help\n\n` +
-      `To start a Claude session, just send a message (creates new thread).`
+      `To start a Claude session, just send a message (creates new thread).\n` +
+      `Use \`[/path]\` prefix to set a custom working directory.`
     );
     return true;
   }
@@ -678,13 +728,28 @@ app.message(async ({ message, say }) => {
   }
 
   const isThread = !!message.thread_ts;
+  const threadTs = message.thread_ts || message.ts;
   const text = message.text?.trim() || '';
   console.log(`[${new Date().toISOString()}] Message from ${message.user}${isThread ? ' (in thread)' : ''}: ${text.substring(0, 100) || '(empty)'}`);
 
-  // Handle bot commands (only in main conversation, not threads)
-  if (!isThread && text.startsWith('!')) {
-    const handled = await handleBotCommand(text, message.channel, say);
-    if (handled) return;
+  // Check if this thread is a Claude session
+  const sessions = loadSessions();
+  const isClaudeSession = isThread && sessions[message.thread_ts];
+
+  // Handle bot commands:
+  // - In main conversation: always handle, respond in new thread
+  // - In thread: only handle if NOT a Claude session (i.e., command thread)
+  if (text.startsWith('!') && !isClaudeSession) {
+    // Wrap say to reply in thread
+    const sayInThread = (text) => say({ text, thread_ts: isThread ? message.thread_ts : message.ts });
+    try {
+      const handled = await handleBotCommand(text, message.channel, sayInThread);
+      if (handled) return;
+    } catch (err) {
+      console.error(`[${new Date().toISOString()}] Command error:`, err);
+      await sayInThread(`:warning: Command failed: ${err.message}`);
+      return;
+    }
   }
 
   await handleMessage(message, message.channel, say);
@@ -832,6 +897,14 @@ app.command('/claude-kill', async ({ command, ack, respond }) => {
   // Start the Slack app
   await app.start();
 
+  // Fetch workspace URL for thread links
+  try {
+    const authResult = await app.client.auth.test();
+    workspaceUrl = authResult.url; // e.g., https://workspace.slack.com/
+  } catch (e) {
+    console.warn('Could not fetch workspace URL:', e.message);
+  }
+
   console.log('');
   console.log('===========================================');
   console.log('  Claude Code Slack Bridge (Multi-Session)');
@@ -845,7 +918,7 @@ app.command('/claude-kill', async ({ command, ack, respond }) => {
   console.log('Usage:');
   console.log('  - DM the bot or @mention it to start a new session');
   console.log('  - Each thread gets its own Claude instance');
-  console.log('  - Use [/path] prefix to set working directory');
+  console.log('  - Use [/path] prefix on new session to set working directory');
   console.log('');
 
   if (!tmuxSessionExists()) {
