@@ -312,13 +312,6 @@ if [[ "$INCLUDE_PROMPT" == "true" ]]; then
   fi
 fi
 
-# Truncate message if too long (Slack limit is ~4000 chars)
-MAX_LENGTH=3500
-MSG_LENGTH=${#FULL_MESSAGE}
-if [[ $MSG_LENGTH -gt $MAX_LENGTH ]]; then
-  FULL_MESSAGE="${FULL_MESSAGE:0:$MAX_LENGTH}\\n\\n_(truncated - ${MSG_LENGTH} chars total)_"
-fi
-
 # Compute hash of message to detect duplicates
 CONTENT_HASH=$(echo "$FULL_MESSAGE" | md5sum | cut -d' ' -f1)
 
@@ -340,18 +333,65 @@ if [[ -f "$LAST_SENT_TIME_FILE" ]]; then
   fi
 fi
 
-# Build JSON payload
-JSON_PAYLOAD="{\"channel\": \"$CHANNEL\", \"text\": \"$FULL_MESSAGE\", \"unfurl_links\": false"
-if [[ -n "$THREAD_TS" ]]; then
-  JSON_PAYLOAD="$JSON_PAYLOAD, \"thread_ts\": \"$THREAD_TS\""
-fi
-JSON_PAYLOAD="$JSON_PAYLOAD}"
+# Function to send a single message
+send_message() {
+  local text="$1"
+  local payload="{\"channel\": \"$CHANNEL\", \"text\": \"$text\", \"unfurl_links\": false"
+  if [[ -n "$THREAD_TS" ]]; then
+    payload="$payload, \"thread_ts\": \"$THREAD_TS\""
+  fi
+  payload="$payload}"
 
-# Send via Slack Web API
-curl -s -X POST "https://slack.com/api/chat.postMessage" \
-  -H "Authorization: Bearer $BOT_TOKEN" \
-  -H "Content-type: application/json" \
-  -d "$JSON_PAYLOAD" > /dev/null
+  curl -s -X POST "https://slack.com/api/chat.postMessage" \
+    -H "Authorization: Bearer $BOT_TOKEN" \
+    -H "Content-type: application/json" \
+    -d "$payload" > /dev/null
+}
+
+# Split and send message if too long (Slack limit is ~4000 chars)
+MAX_LENGTH=3500
+MSG_LENGTH=${#FULL_MESSAGE}
+
+if [[ $MSG_LENGTH -le $MAX_LENGTH ]]; then
+  # Message fits in one chunk
+  send_message "$FULL_MESSAGE"
+else
+  # Split into multiple messages
+  PART=1
+  REMAINING="$FULL_MESSAGE"
+
+  while [[ ${#REMAINING} -gt 0 ]]; do
+    if [[ ${#REMAINING} -le $MAX_LENGTH ]]; then
+      # Last chunk
+      CHUNK="$REMAINING"
+      REMAINING=""
+    else
+      # Find a good break point (newline) near the limit
+      CHUNK="${REMAINING:0:$MAX_LENGTH}"
+      # Try to break at last newline
+      LAST_NEWLINE=$(echo "$CHUNK" | grep -bo '\\n' | tail -1 | cut -d: -f1)
+      if [[ -n "$LAST_NEWLINE" && $LAST_NEWLINE -gt 1000 ]]; then
+        CHUNK="${REMAINING:0:$LAST_NEWLINE}"
+        REMAINING="${REMAINING:$LAST_NEWLINE}"
+      else
+        REMAINING="${REMAINING:$MAX_LENGTH}"
+      fi
+    fi
+
+    # Add part indicator if splitting
+    if [[ $PART -eq 1 && -n "$REMAINING" ]]; then
+      CHUNK="$CHUNK\\n_(continued...)_"
+    elif [[ $PART -gt 1 ]]; then
+      CHUNK="_(part $PART)_\\n$CHUNK"
+    fi
+
+    send_message "$CHUNK"
+    PART=$((PART + 1))
+
+    # Small delay between messages to maintain order
+    [[ -n "$REMAINING" ]] && sleep 0.2
+  done
+fi
 
 # Update session last_activity timestamp (message forwarded to Slack)
 if [[ -n "$THREAD_TS" && -f "$SESSIONS_FILE" ]]; then
