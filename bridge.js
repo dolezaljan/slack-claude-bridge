@@ -1,6 +1,6 @@
 import Bolt from '@slack/bolt';
 import { execSync } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, createWriteStream } from 'fs';
+import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, createWriteStream, rmSync } from 'fs';
 import { pipeline } from 'stream/promises';
 import { createHash } from 'crypto';
 
@@ -480,6 +480,17 @@ function terminateSession(threadTs, session) {
     // Window may already be gone
   }
 
+  // Clean up temp files for this session
+  const tempDir = `/tmp/claude-slack-files/${threadTs}`;
+  try {
+    if (existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true });
+      console.log(`[${new Date().toISOString()}] Cleaned up temp files: ${tempDir}`);
+    }
+  } catch (e) {
+    console.error(`Failed to clean up temp files: ${e.message}`);
+  }
+
   // Update session status
   const sessions = loadSessions();
   if (sessions[threadTs]) {
@@ -795,7 +806,9 @@ function formatHelpMessage() {
     `• \`!find <name>\` or \`!f\` - Find project directories\n` +
     `• \`!kill <window>\` - Terminate a session by window name\n` +
     `• \`!kill\` (in thread) - Terminate current session\n` +
+    `• \`!status\` (in thread) - Show current session info\n` +
     `• \`!help\` - Show this help\n\n` +
+    `*Reactions:* :octagonal_sign: kill, :white_check_mark: approve, :x: reject\n\n` +
     `To start a Claude session, just send a message (creates new thread).\n` +
     `Use \`[/path]\` prefix to set a custom working directory.`;
 }
@@ -955,6 +968,32 @@ app.message(async ({ message, say }) => {
     return;
   }
 
+  // Special case: !status within a Claude session shows session info
+  if (text.toLowerCase() === '!status' && isClaudeSession) {
+    const session = sessions[message.thread_ts];
+    if (session) {
+      const now = new Date();
+      const lastActivity = session.last_activity ? new Date(session.last_activity) : null;
+      const idleSeconds = lastActivity ? Math.round((now - lastActivity) / 1000) : 0;
+      const idleStr = idleSeconds > 60 ? `${Math.round(idleSeconds / 60)}m` : `${idleSeconds}s`;
+      const dir = session.workingDir?.replace(process.env.HOME, '~') || '~';
+      const statusEmoji = session.status === 'idle' ? ':zzz:' : session.status === 'starting' ? ':hourglass:' : ':green_circle:';
+
+      await say({
+        text: `${statusEmoji} *Session Info*\n` +
+          `• Window: \`${session.window}\`\n` +
+          `• Directory: \`${dir}\`\n` +
+          `• Status: ${session.status}\n` +
+          `• Idle: ${idleStr}\n` +
+          `• Session ID: \`${session.sessionId || 'pending'}\``,
+        thread_ts: message.thread_ts
+      });
+    } else {
+      await say({ text: ':warning: Session not found.', thread_ts: message.thread_ts });
+    }
+    return;
+  }
+
   // Handle bot commands:
   // - In main conversation: always handle, respond in new thread
   // - In thread: only handle if NOT a Claude session (i.e., command thread)
@@ -1002,6 +1041,77 @@ app.event('app_mention', async ({ event, say }) => {
   };
 
   await handleMessage(messageObj, event.channel, say);
+});
+
+// Handle reactions as commands
+app.event('reaction_added', async ({ event }) => {
+  // Only handle reactions from authorized users
+  if (!isAuthorized(event.user)) return;
+
+  // Only handle reactions in threads (Claude sessions)
+  if (!event.item.ts) return;
+
+  const sessions = loadSessions();
+  // Find session by thread_ts (the reaction could be on any message in the thread)
+  // We need to find if this message belongs to a Claude session thread
+  const threadTs = event.item.ts;
+
+  // Check if there's a session for this thread or if the message is in a session thread
+  let session = sessions[threadTs];
+  let sessionThreadTs = threadTs;
+
+  // If not found directly, this might be a reaction on a reply in the thread
+  // We'd need the thread_ts of the parent, but reaction_added doesn't give us that
+  // So we'll only handle reactions on the original message that started the session
+  if (!session) {
+    // Try to find a session where this ts might be a message in the thread
+    // This is limited - reactions only work on the thread's parent message
+    return;
+  }
+
+  if (session.status === 'terminated') return;
+
+  const reaction = event.reaction;
+  console.log(`[${new Date().toISOString()}] Reaction ${reaction} on session ${session.window}`);
+
+  // 🛑 Stop/kill session
+  if (reaction === 'octagonal_sign' || reaction === 'stop_sign' || reaction === 'no_entry') {
+    console.log(`[${new Date().toISOString()}] Killing session via reaction`);
+    terminateSession(sessionThreadTs, session);
+    // Post confirmation
+    try {
+      await app.client.chat.postMessage({
+        channel: event.item.channel,
+        thread_ts: sessionThreadTs,
+        text: ':skull: Session terminated via reaction.'
+      });
+    } catch (e) {
+      console.error(`Failed to post termination message: ${e.message}`);
+    }
+    return;
+  }
+
+  // ✅ Approve permission prompt (send "1" to select first option)
+  if (reaction === 'white_check_mark' || reaction === 'heavy_check_mark') {
+    console.log(`[${new Date().toISOString()}] Approving via reaction`);
+    try {
+      execSync(`tmux send-keys -t ${TMUX_SESSION}:${session.window} '1'`);
+    } catch (e) {
+      console.error(`Failed to send approval: ${e.message}`);
+    }
+    return;
+  }
+
+  // ❌ Reject/deny permission prompt (send "2" for No or Escape to cancel)
+  if (reaction === 'x' || reaction === 'negative_squared_cross_mark') {
+    console.log(`[${new Date().toISOString()}] Rejecting via reaction`);
+    try {
+      execSync(`tmux send-keys -t ${TMUX_SESSION}:${session.window} Escape`);
+    } catch (e) {
+      console.error(`Failed to send rejection: ${e.message}`);
+    }
+    return;
+  }
 });
 
 // ============================================

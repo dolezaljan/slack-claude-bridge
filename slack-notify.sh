@@ -312,6 +312,13 @@ if [[ "$INCLUDE_PROMPT" == "true" ]]; then
   fi
 fi
 
+# Truncate message if too long (Slack limit is ~4000 chars)
+MAX_LENGTH=3500
+MSG_LENGTH=${#FULL_MESSAGE}
+if [[ $MSG_LENGTH -gt $MAX_LENGTH ]]; then
+  FULL_MESSAGE="${FULL_MESSAGE:0:$MAX_LENGTH}\\n\\n_(truncated - ${MSG_LENGTH} chars total)_"
+fi
+
 # Compute hash of message to detect duplicates
 CONTENT_HASH=$(echo "$FULL_MESSAGE" | md5sum | cut -d' ' -f1)
 

@@ -165,7 +165,7 @@ Attach files to your Slack message - they'll be downloaded and passed to Claude:
 
 ### Bot Commands
 
-Send these in DM (not in a Claude session thread):
+Send these in DM (outside of Claude session threads):
 
 | Command | Description |
 |---------|-------------|
@@ -174,6 +174,23 @@ Send these in DM (not in a Claude session thread):
 | `!kill <window>` | Terminate a session |
 | `!find <name>` or `!f` | Find project directories |
 | `!help` | Show help |
+
+**In-thread commands** (within a Claude session):
+
+| Command | Description |
+|---------|-------------|
+| `!kill` | Terminate this session |
+| `!status` | Show session info (window, directory, idle time) |
+
+### Reactions
+
+React to the thread's first message to control the session:
+
+| Reaction | Action |
+|----------|--------|
+| 🛑 `:octagonal_sign:` | Kill/terminate session |
+| ✅ `:white_check_mark:` | Approve permission prompt |
+| ❌ `:x:` | Reject/cancel permission prompt |
 
 ### Slash Commands
 
