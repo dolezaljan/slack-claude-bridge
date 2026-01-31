@@ -2,6 +2,7 @@ import Bolt from '@slack/bolt';
 import { execSync } from 'child_process';
 import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, createWriteStream } from 'fs';
 import { pipeline } from 'stream/promises';
+import { createHash } from 'crypto';
 
 const { App } = Bolt;
 
@@ -30,7 +31,54 @@ function loadConfig() {
   return config;
 }
 
+// Acquire exclusive lock to prevent multiple instances with same config
+function acquireInstanceLock(botToken) {
+  // Create lock file name based on hash of bot token (so different configs can run)
+  const tokenHash = createHash('sha256').update(botToken).digest('hex').substring(0, 16);
+  const lockFile = `/tmp/claude-slack-bridge-${tokenHash}.lock`;
+
+  // Check if lock file exists and if the process is still running
+  if (existsSync(lockFile)) {
+    try {
+      const pid = readFileSync(lockFile, 'utf-8').trim();
+      // Check if process is still running
+      execSync(`kill -0 ${pid} 2>/dev/null`);
+      // Process is running
+      console.error(`Another bridge instance is already running (PID: ${pid})`);
+      console.error(`Lock file: ${lockFile}`);
+      console.error('Stop the other instance first, or remove the lock file if stale.');
+      process.exit(1);
+    } catch {
+      // Process not running, stale lock file - remove it
+      console.log(`Removing stale lock file (previous PID: ${readFileSync(lockFile, 'utf-8').trim()})`);
+    }
+  }
+
+  // Write our PID to lock file
+  writeFileSync(lockFile, `${process.pid}\n`);
+
+  // Clean up lock file on exit
+  const cleanup = () => {
+    try {
+      // Only remove if it's our PID
+      if (existsSync(lockFile) && readFileSync(lockFile, 'utf-8').trim() === `${process.pid}`) {
+        execSync(`rm -f ${lockFile}`);
+      }
+    } catch {}
+  };
+
+  process.on('exit', cleanup);
+  process.on('SIGINT', () => { cleanup(); process.exit(0); });
+  process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+
+  return lockFile;
+}
+
 const config = loadConfig();
+
+// Prevent multiple instances with same config
+acquireInstanceLock(config.botToken);
+
 const TMUX_SESSION = config.multiSession.tmuxSession;
 
 // Initialize Slack app with Socket Mode
