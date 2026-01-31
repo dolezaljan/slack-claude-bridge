@@ -579,6 +579,116 @@ async function handleMessage(message, channel, say) {
 }
 
 // ============================================
+// Shared Command Formatters
+// ============================================
+
+// Check if user is authorized
+function isAuthorized(userId) {
+  if (!config.allowedUsers || config.allowedUsers.length === 0) {
+    return true;
+  }
+  return config.allowedUsers.includes(userId);
+}
+
+// Format a single session for display
+function formatSession(threadTs, s) {
+  const now = new Date();
+  const idleTime = s.idle_since ? Math.round((now - new Date(s.idle_since)) / 1000) : 0;
+  const statusEmoji = s.status === 'idle' ? ':zzz:' : s.status === 'starting' ? ':hourglass:' : ':green_circle:';
+  const idleStr = s.status === 'idle' ? ` (idle ${idleTime}s)` : '';
+  const dir = s.workingDir?.replace(process.env.HOME, '~') || '~';
+  const threadLink = workspaceUrl && s.channel
+    ? `<${workspaceUrl}archives/${s.channel}/p${threadTs.replace('.', '')}|→>`
+    : '';
+  return { statusEmoji, dir, idleStr, threadLink, window: s.window };
+}
+
+// Get bridge status info
+function getBridgeStatus() {
+  const sessions = loadSessions();
+  return {
+    active: Object.values(sessions).filter(s => s.status !== 'terminated').length,
+    idle: Object.values(sessions).filter(s => s.status === 'idle').length,
+    terminated: Object.values(sessions).filter(s => s.status === 'terminated').length,
+    tmuxOk: tmuxSessionExists()
+  };
+}
+
+// Format status message
+function formatStatusMessage(status) {
+  const tmuxEmoji = status.tmuxOk ? ':white_check_mark:' : ':x:';
+  return `:robot_face: *Claude Code Bridge Status*\n` +
+    `• tmux session \`${TMUX_SESSION}\`: ${tmuxEmoji}\n` +
+    `• Active sessions: ${status.active}/${config.multiSession.maxConcurrent}\n` +
+    `• Idle sessions: ${status.idle}\n` +
+    `• Terminated (can resurrect): ${status.terminated}\n` +
+    `• Idle timeout: ${config.multiSession.idleTimeoutMinutes} minutes`;
+}
+
+// Format help message
+function formatHelpMessage() {
+  return `:information_source: *Bot Commands*\n` +
+    `• \`!sessions\` or \`!s\` - List active sessions\n` +
+    `• \`!status\` - Show bridge status\n` +
+    `• \`!find <name>\` or \`!f\` - Find project directories\n` +
+    `• \`!kill <window>\` - Terminate a session\n` +
+    `• \`!help\` - Show this help\n\n` +
+    `To start a Claude session, just send a message (creates new thread).\n` +
+    `Use \`[/path]\` prefix to set a custom working directory.`;
+}
+
+// Kill a session by window name, returns result message
+function killSession(windowName) {
+  if (!windowName) {
+    return { success: false, message: ':warning: Usage: `!kill <window-name>`\nUse `!sessions` to see active windows.' };
+  }
+
+  const sessions = loadSessions();
+  const entry = Object.entries(sessions).find(([_, s]) => s.window === windowName && s.status !== 'terminated');
+
+  if (!entry) {
+    return { success: false, message: `:warning: Session \`${windowName}\` not found or already terminated.` };
+  }
+
+  const [threadTs, session] = entry;
+  terminateSession(threadTs, session);
+  return { success: true, message: `:skull: Session \`${windowName}\` terminated.` };
+}
+
+// Find directories matching query
+function findDirectories(query) {
+  if (!query) {
+    return { success: false, paths: [], message: ':warning: Usage: `!find <name>` - Search for project directories' };
+  }
+
+  // Sanitize query to prevent command injection
+  const safeQuery = query.replace(/[^a-zA-Z0-9_.-]/g, '');
+  if (!safeQuery) {
+    return { success: false, paths: [], message: ':warning: Invalid search query' };
+  }
+
+  try {
+    const home = process.env.HOME;
+    const result = execSync(
+      `find ~ -maxdepth 4 -type d -iname "*${safeQuery}*" 2>/dev/null | head -20`,
+      { encoding: 'utf-8', timeout: 10000 }
+    ).trim();
+
+    if (!result) {
+      return { success: true, paths: [], message: `:mag: No directories found matching \`${query}\`` };
+    }
+
+    const paths = result.split('\n')
+      .map(p => p.replace(home, '~'))
+      .slice(0, 10);
+
+    return { success: true, paths, message: `:mag: Found ${paths.length} matching "${query}":` };
+  } catch (err) {
+    return { success: false, paths: [], message: `:warning: Search failed: ${err.message}` };
+  }
+}
+
+// ============================================
 // Bot Commands (via DM)
 // ============================================
 
@@ -595,113 +705,47 @@ async function handleBotCommand(text, channel, say) {
       return true;
     }
 
-    const now = new Date();
     await say(`:clipboard: *Active Sessions (${activeSessions.length}/${config.multiSession.maxConcurrent})*`);
 
     for (const [threadTs, s] of activeSessions) {
-      const idleTime = s.idle_since ? Math.round((now - new Date(s.idle_since)) / 1000) : 0;
-      const statusEmoji = s.status === 'idle' ? ':zzz:' : s.status === 'starting' ? ':hourglass:' : ':green_circle:';
-      const idleStr = s.status === 'idle' ? ` (idle ${idleTime}s)` : '';
-      const dir = s.workingDir?.replace(process.env.HOME, '~') || '~';
-      // Build thread link: https://workspace.slack.com/archives/CHANNEL/pTIMESTAMP
-      const threadLink = workspaceUrl && s.channel
-        ? `<${workspaceUrl}archives/${s.channel}/p${threadTs.replace('.', '')}|→>`
-        : '';
-      await say(`${statusEmoji} ${dir}${idleStr} ${threadLink}`);
-      await say(s.window);
+      const fmt = formatSession(threadTs, s);
+      await say(`${fmt.statusEmoji} ${fmt.dir}${fmt.idleStr} ${fmt.threadLink}`);
+      await say(fmt.window);
     }
     return true;
   }
 
   // !status - Show bridge status
   if (cmd === '!status') {
-    const sessions = loadSessions();
-    const active = Object.values(sessions).filter(s => s.status !== 'terminated').length;
-    const idle = Object.values(sessions).filter(s => s.status === 'idle').length;
-    const terminated = Object.values(sessions).filter(s => s.status === 'terminated').length;
-    const tmuxOk = tmuxSessionExists() ? ':white_check_mark:' : ':x:';
-
-    await say(
-      `:robot_face: *Claude Code Bridge Status*\n` +
-      `• tmux session \`${TMUX_SESSION}\`: ${tmuxOk}\n` +
-      `• Active sessions: ${active}/${config.multiSession.maxConcurrent}\n` +
-      `• Idle sessions: ${idle}\n` +
-      `• Terminated (can resurrect): ${terminated}\n` +
-      `• Idle timeout: ${config.multiSession.idleTimeoutMinutes} minutes`
-    );
+    await say(formatStatusMessage(getBridgeStatus()));
     return true;
   }
 
   // !kill <window> - Terminate a session
   if (cmd.startsWith('!kill ')) {
     const windowName = text.slice(6).trim();
-    if (!windowName) {
-      await say(':warning: Usage: `!kill <window-name>`\nUse `!sessions` to see active windows.');
-      return true;
-    }
-
-    const sessions = loadSessions();
-    const entry = Object.entries(sessions).find(([_, s]) => s.window === windowName && s.status !== 'terminated');
-
-    if (!entry) {
-      await say(`:warning: Session \`${windowName}\` not found or already terminated.`);
-      return true;
-    }
-
-    const [threadTs, session] = entry;
-    terminateSession(threadTs, session);
-    await say(`:skull: Session \`${windowName}\` terminated.`);
+    const result = killSession(windowName);
+    await say(result.message);
     return true;
   }
 
   // !find <query> - Find project paths
   if (cmd.startsWith('!find ') || cmd.startsWith('!f ')) {
-    const query = text.slice(cmd.startsWith('!f ') ? 3 : 6).trim().toLowerCase();
-    if (!query) {
-      await say(':warning: Usage: `!find <name>` - Search for project directories');
-      return true;
-    }
+    const query = text.slice(cmd.startsWith('!f ') ? 3 : 6).trim();
+    const result = findDirectories(query);
 
-    try {
-      const home = process.env.HOME;
-
-      // Find directories with .git, package.json, Cargo.toml, go.mod, etc.
-      const result = execSync(
-        `find ~ -maxdepth 4 -type d -iname "*${query}*" 2>/dev/null | head -20`,
-        { encoding: 'utf-8', timeout: 10000 }
-      ).trim();
-
-      if (!result) {
-        await say(`:mag: No directories found matching \`${query}\``);
-        return true;
-      }
-
-      const paths = result.split('\n')
-        .map(p => p.replace(home, '~'))
-        .slice(0, 10);
-
-      await say(`:mag: Found ${paths.length} matching "${query}":`);
-      for (const p of paths) {
+    await say(result.message);
+    if (result.success && result.paths.length > 0) {
+      for (const p of result.paths) {
         await say(p);
       }
-    } catch (err) {
-      await say(`:warning: Search failed: ${err.message}`);
     }
     return true;
   }
 
   // !help - Show available commands
   if (cmd === '!help' || cmd === '!h') {
-    await say(
-      `:information_source: *Bot Commands*\n` +
-      `• \`!sessions\` or \`!s\` - List active sessions\n` +
-      `• \`!status\` - Show bridge status\n` +
-      `• \`!find <name>\` or \`!f\` - Find project directories\n` +
-      `• \`!kill <window>\` - Terminate a session\n` +
-      `• \`!help\` - Show this help\n\n` +
-      `To start a Claude session, just send a message (creates new thread).\n` +
-      `Use \`[/path]\` prefix to set a custom working directory.`
-    );
+    await say(formatHelpMessage());
     return true;
   }
 
@@ -720,11 +764,9 @@ app.message(async ({ message, say }) => {
   if (!message.user) return;
 
   // Check if user is allowed (optional security)
-  if (config.allowedUsers && config.allowedUsers.length > 0) {
-    if (!config.allowedUsers.includes(message.user)) {
-      await say("Sorry, you're not authorized to control Claude Code.");
-      return;
-    }
+  if (!isAuthorized(message.user)) {
+    await say("Sorry, you're not authorized to control Claude Code.");
+    return;
   }
 
   const isThread = !!message.thread_ts;
@@ -758,11 +800,9 @@ app.message(async ({ message, say }) => {
 // Handle app mentions in channels
 app.event('app_mention', async ({ event, say }) => {
   // Check if user is allowed
-  if (config.allowedUsers && config.allowedUsers.length > 0) {
-    if (!config.allowedUsers.includes(event.user)) {
-      await say("Sorry, you're not authorized to control Claude Code.");
-      return;
-    }
+  if (!isAuthorized(event.user)) {
+    await say("Sorry, you're not authorized to control Claude Code.");
+    return;
   }
 
   // Remove the bot mention from the text
@@ -788,18 +828,16 @@ app.event('app_mention', async ({ event, say }) => {
 });
 
 // ============================================
-// Slash Commands
+// Slash Commands (use shared formatters)
 // ============================================
 
 // /claude-sessions - List active sessions
 app.command('/claude-sessions', async ({ command, ack, respond }) => {
   await ack();
 
-  if (config.allowedUsers && config.allowedUsers.length > 0) {
-    if (!config.allowedUsers.includes(command.user_id)) {
-      await respond("Sorry, you're not authorized.");
-      return;
-    }
+  if (!isAuthorized(command.user_id)) {
+    await respond("Sorry, you're not authorized.");
+    return;
   }
 
   const sessions = loadSessions();
@@ -810,13 +848,9 @@ app.command('/claude-sessions', async ({ command, ack, respond }) => {
     return;
   }
 
-  const now = new Date();
   const lines = activeSessions.map(([threadTs, s]) => {
-    const idleTime = s.idle_since ? Math.round((now - new Date(s.idle_since)) / 1000) : 0;
-    const statusEmoji = s.status === 'idle' ? ':zzz:' : s.status === 'starting' ? ':hourglass:' : ':green_circle:';
-    const idleStr = s.status === 'idle' ? ` (idle ${idleTime}s)` : '';
-    const dir = s.workingDir?.replace(process.env.HOME, '~') || '~';
-    return `${statusEmoji} \`${s.window}\` - ${dir}${idleStr}`;
+    const fmt = formatSession(threadTs, s);
+    return `${fmt.statusEmoji} \`${fmt.window}\` - ${fmt.dir}${fmt.idleStr} ${fmt.threadLink}`;
   });
 
   await respond(`:clipboard: *Active Sessions (${activeSessions.length}/${config.multiSession.maxConcurrent})*\n${lines.join('\n')}`);
@@ -826,58 +860,48 @@ app.command('/claude-sessions', async ({ command, ack, respond }) => {
 app.command('/claude-status', async ({ command, ack, respond }) => {
   await ack();
 
-  if (config.allowedUsers && config.allowedUsers.length > 0) {
-    if (!config.allowedUsers.includes(command.user_id)) {
-      await respond("Sorry, you're not authorized.");
-      return;
-    }
+  if (!isAuthorized(command.user_id)) {
+    await respond("Sorry, you're not authorized.");
+    return;
   }
 
-  const sessions = loadSessions();
-  const active = Object.values(sessions).filter(s => s.status !== 'terminated').length;
-  const idle = Object.values(sessions).filter(s => s.status === 'idle').length;
-  const terminated = Object.values(sessions).filter(s => s.status === 'terminated').length;
-
-  const tmuxOk = tmuxSessionExists() ? ':white_check_mark:' : ':x:';
-
-  await respond(
-    `:robot_face: *Claude Code Bridge Status*\n` +
-    `• tmux session \`${TMUX_SESSION}\`: ${tmuxOk}\n` +
-    `• Active sessions: ${active}/${config.multiSession.maxConcurrent}\n` +
-    `• Idle sessions: ${idle}\n` +
-    `• Terminated (can resurrect): ${terminated}\n` +
-    `• Idle timeout: ${config.multiSession.idleTimeoutMinutes} minutes`
-  );
+  await respond(formatStatusMessage(getBridgeStatus()));
 });
 
 // /claude-kill - Terminate a session
 app.command('/claude-kill', async ({ command, ack, respond }) => {
   await ack();
 
-  if (config.allowedUsers && config.allowedUsers.length > 0) {
-    if (!config.allowedUsers.includes(command.user_id)) {
-      await respond("Sorry, you're not authorized.");
-      return;
-    }
-  }
-
-  const windowName = command.text.trim();
-  if (!windowName) {
-    await respond(':warning: Usage: `/claude-kill <window-name>`\nUse `/claude-sessions` to see active windows.');
+  if (!isAuthorized(command.user_id)) {
+    await respond("Sorry, you're not authorized.");
     return;
   }
 
-  const sessions = loadSessions();
-  const entry = Object.entries(sessions).find(([_, s]) => s.window === windowName && s.status !== 'terminated');
+  const result = killSession(command.text.trim());
+  await respond(result.message);
+});
 
-  if (!entry) {
-    await respond(`:warning: Session \`${windowName}\` not found or already terminated.`);
+// /claude-find - Find project directories
+app.command('/claude-find', async ({ command, ack, respond }) => {
+  await ack();
+
+  if (!isAuthorized(command.user_id)) {
+    await respond("Sorry, you're not authorized.");
     return;
   }
 
-  const [threadTs, session] = entry;
-  terminateSession(threadTs, session);
-  await respond(`:skull: Session \`${windowName}\` terminated.`);
+  const result = findDirectories(command.text.trim());
+  if (result.paths.length > 0) {
+    await respond(`${result.message}\n${result.paths.map(p => `• \`${p}\``).join('\n')}`);
+  } else {
+    await respond(result.message);
+  }
+});
+
+// /claude-help - Show help
+app.command('/claude-help', async ({ command, ack, respond }) => {
+  await ack();
+  await respond(formatHelpMessage());
 });
 
 // ============================================
