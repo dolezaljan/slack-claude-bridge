@@ -24,7 +24,7 @@ function loadConfig() {
   // Set defaults for multiSession config
   config.multiSession = config.multiSession || {};
   config.multiSession.maxConcurrent = config.multiSession.maxConcurrent || 5;
-  config.multiSession.idleTimeoutMinutes = config.multiSession.idleTimeoutMinutes || 15;
+  config.multiSession.idleTimeoutMinutes = config.multiSession.idleTimeoutMinutes || 60;
   config.multiSession.tmuxSession = config.multiSession.tmuxSession || 'claude';
   config.multiSession.defaultWorkingDir = config.multiSession.defaultWorkingDir || '~';
 

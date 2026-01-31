@@ -86,7 +86,7 @@ Optional multi-session settings (defaults shown):
 {
   "multiSession": {
     "maxConcurrent": 5,
-    "idleTimeoutMinutes": 15,
+    "idleTimeoutMinutes": 60,
     "tmuxSession": "claude",
     "defaultWorkingDir": "~"
   }
