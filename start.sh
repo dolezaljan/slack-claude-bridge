@@ -40,14 +40,39 @@ fi
 # Check if tmux session exists
 if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
   echo -e "${YELLOW}Creating tmux session '$TMUX_SESSION'...${NC}"
-  tmux new-session -d -s "$TMUX_SESSION"
-  echo -e "${GREEN}✓ Created${NC}"
-fi
+  # Create session with bridge window at position 0
+  tmux new-session -d -s "$TMUX_SESSION" -n bridge -c "$BRIDGE_DIR"
+  tmux send-keys -t "$TMUX_SESSION:bridge" "node bridge.js 2>&1 | tee $LOG_FILE" Enter
+  echo -e "${GREEN}✓ Created tmux session with bridge at window 0${NC}"
+else
+  echo -e "${YELLOW}tmux session '$TMUX_SESSION' exists${NC}"
 
-# Start the bridge
-echo "Starting bridge..."
-cd "$BRIDGE_DIR"
-nohup node bridge.js > "$LOG_FILE" 2>&1 &
+  # Check if bridge window already exists
+  if tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}' | grep -q '^bridge$'; then
+    echo -e "${YELLOW}Bridge window exists, starting process...${NC}"
+    # Start the bridge in the existing window (in case it died)
+    tmux send-keys -t "$TMUX_SESSION:bridge" "node bridge.js 2>&1 | tee $LOG_FILE" Enter
+  else
+    # Create new window for bridge
+    tmux new-window -t "$TMUX_SESSION": -n bridge -c "$BRIDGE_DIR"
+
+    # Get the current index of the bridge window
+    BRIDGE_IDX=$(tmux list-windows -t "$TMUX_SESSION" -F '#{window_index} #{window_name}' | grep ' bridge$' | cut -d' ' -f1)
+
+    # Move bridge window to position 0 (swap if 0 exists, otherwise move)
+    if tmux list-windows -t "$TMUX_SESSION" -F '#{window_index}' | grep -q '^0$'; then
+      # Window 0 exists, swap with it
+      tmux swap-window -s "$TMUX_SESSION:$BRIDGE_IDX" -t "$TMUX_SESSION:0"
+    else
+      # No window 0, just move
+      tmux move-window -s "$TMUX_SESSION:$BRIDGE_IDX" -t "$TMUX_SESSION:0"
+    fi
+
+    # Start the bridge in the window
+    tmux send-keys -t "$TMUX_SESSION:bridge" "node bridge.js 2>&1 | tee $LOG_FILE" Enter
+    echo -e "${GREEN}✓ Created bridge window at position 0${NC}"
+  fi
+fi
 
 # Wait and check if it started
 sleep 2
@@ -55,10 +80,12 @@ if pgrep -f "node bridge.js" > /dev/null; then
   echo -e "${GREEN}✓ Bridge started${NC}"
   echo ""
   echo "Log file: $LOG_FILE"
+  echo "tmux:     tmux attach -t $TMUX_SESSION"
   echo ""
   tail -15 "$LOG_FILE"
   echo ""
   echo "Commands:"
+  echo "  attach:  tmux attach -t $TMUX_SESSION"
   echo "  logs:    tail -f $LOG_FILE"
   echo "  stop:    pkill -f 'node bridge.js'"
   echo "  restart: $0 --restart"

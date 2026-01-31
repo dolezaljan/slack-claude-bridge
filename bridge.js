@@ -1,6 +1,7 @@
 import Bolt from '@slack/bolt';
 import { execSync } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, statSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, createWriteStream } from 'fs';
+import { pipeline } from 'stream/promises';
 
 const { App } = Bolt;
 
@@ -267,6 +268,76 @@ async function notifySessionEnded(channel, threadTs) {
 }
 
 // ============================================
+// File Download Helpers
+// ============================================
+
+// Supported file types that Claude can read
+const SUPPORTED_IMAGE_TYPES = ['png', 'jpg', 'jpeg', 'gif', 'webp'];
+const SUPPORTED_DOC_TYPES = ['pdf'];
+const SUPPORTED_TEXT_TYPES = [
+  'txt', 'md', 'json', 'js', 'ts', 'jsx', 'tsx', 'py', 'rb', 'go', 'rs', 'java',
+  'c', 'cpp', 'h', 'hpp', 'cs', 'php', 'html', 'css', 'scss', 'sass', 'less',
+  'xml', 'yaml', 'yml', 'toml', 'ini', 'conf', 'cfg', 'sh', 'bash', 'zsh',
+  'sql', 'graphql', 'vue', 'svelte', 'astro', 'swift', 'kt', 'scala', 'clj',
+  'ex', 'exs', 'erl', 'hs', 'ml', 'fs', 'r', 'jl', 'lua', 'pl', 'pm', 'rake',
+  'gemspec', 'podspec', 'gradle', 'cmake', 'makefile', 'dockerfile', 'env',
+  'gitignore', 'editorconfig', 'prettierrc', 'eslintrc', 'babelrc'
+];
+
+// Check if file type is supported by Claude
+function isFileSupported(filename) {
+  const ext = filename.toLowerCase().split('.').pop() || '';
+  const basename = filename.toLowerCase();
+
+  // Check known extensions
+  if (SUPPORTED_IMAGE_TYPES.includes(ext)) return { supported: true, type: 'image' };
+  if (SUPPORTED_DOC_TYPES.includes(ext)) return { supported: true, type: 'document' };
+  if (SUPPORTED_TEXT_TYPES.includes(ext)) return { supported: true, type: 'text' };
+
+  // Check common filenames without extensions
+  const knownFiles = ['makefile', 'dockerfile', 'gemfile', 'rakefile', 'procfile'];
+  if (knownFiles.includes(basename)) return { supported: true, type: 'text' };
+
+  return { supported: false, type: 'unknown' };
+}
+
+// Download a file from Slack to local temp directory
+async function downloadSlackFile(file, threadTs) {
+  const tempDir = `/tmp/claude-slack-files/${threadTs}`;
+  mkdirSync(tempDir, { recursive: true });
+
+  // Generate unique filename
+  let filename = file.name || `file-${Date.now()}`;
+  let filepath = `${tempDir}/${filename}`;
+
+  // Handle duplicate names
+  let counter = 1;
+  while (existsSync(filepath)) {
+    const ext = filename.includes('.') ? filename.slice(filename.lastIndexOf('.')) : '';
+    const base = filename.includes('.') ? filename.slice(0, filename.lastIndexOf('.')) : filename;
+    filepath = `${tempDir}/${base}-${counter}${ext}`;
+    counter++;
+  }
+
+  // Download with auth
+  const response = await fetch(file.url_private_download, {
+    headers: { 'Authorization': `Bearer ${config.botToken}` }
+  });
+
+  if (!response.ok) {
+    console.error(`Failed to download ${file.name}: ${response.status}`);
+    return null;
+  }
+
+  // Stream to file
+  const fileStream = createWriteStream(filepath);
+  await pipeline(response.body, fileStream);
+
+  console.log(`Downloaded: ${file.name} -> ${filepath}`);
+  return filepath;
+}
+
+// ============================================
 // Session Lifecycle
 // ============================================
 
@@ -470,19 +541,19 @@ async function handleMessage(message, channel, say) {
   const threadTs = message.thread_ts || message.ts;
   const isNewThread = !message.thread_ts;  // First message creates thread
 
-  // Guard against empty messages
-  if (!message.text) {
+  // Guard against empty messages (but allow messages with only files)
+  if (!message.text && (!message.files || message.files.length === 0)) {
     console.log(`[${new Date().toISOString()}] Ignoring empty message in thread ${threadTs}`);
     return;
   }
 
   // Parse working directory from message (only for new threads)
-  let messageText = message.text;
+  let messageText = message.text || '';
   let workingDir = null;
   let dirWarning = null;
 
-  if (isNewThread) {
-    const { requestedPath, message: cleanMessage } = parseWorkingDir(message.text);
+  if (isNewThread && messageText) {
+    const { requestedPath, message: cleanMessage } = parseWorkingDir(messageText);
     messageText = cleanMessage;
     const resolved = resolveWorkingDir(requestedPath);
     workingDir = resolved.path;
@@ -556,19 +627,58 @@ async function handleMessage(message, channel, say) {
   sessions[threadTs] = session;
   saveSessions(sessions);
 
+  // Handle file attachments
+  let filePaths = [];
+  let unsupportedFiles = [];
+
+  if (message.files && message.files.length > 0) {
+    console.log(`[${new Date().toISOString()}] Processing ${message.files.length} file(s)`);
+
+    for (const file of message.files) {
+      const fileInfo = isFileSupported(file.name || '');
+
+      if (fileInfo.supported) {
+        const localPath = await downloadSlackFile(file, threadTs);
+        if (localPath) {
+          filePaths.push(localPath);
+        }
+      } else {
+        unsupportedFiles.push(file.name || 'unknown');
+        console.log(`[${new Date().toISOString()}] Skipping unsupported file type: ${file.name}`);
+      }
+    }
+  }
+
+  // Note unsupported files in message
+  if (unsupportedFiles.length > 0) {
+    messageText += '\n\n[Unsupported file types: ' + unsupportedFiles.join(', ') + ']';
+  }
+
   // Send message to appropriate tmux window
-  console.log(`[${new Date().toISOString()}] Routing message to window ${session.window}: ${messageText.substring(0, 50)}...`);
+  console.log(`[${new Date().toISOString()}] Routing message to window ${session.window}`);
 
   if (isNewSession) {
     // Wait for Claude to start and show prompt
     console.log(`[${new Date().toISOString()}] New session - waiting for Claude to be ready...`);
     await waitForClaudeReady(session.window);
-    // Log what we see before sending
-    const paneContent = capturePaneContent(session.window);
-    console.log(`[${new Date().toISOString()}] Pane content before send:\n${paneContent.slice(-500)}`);
   }
 
-  await sendToWindow(session.window, messageText);
+  // Send files first if any, then send text
+  if (filePaths.length > 0) {
+    // Send each file path and wait for paste mode to complete
+    for (const filepath of filePaths) {
+      console.log(`[${new Date().toISOString()}] Sending file: ${filepath}`);
+      await sendToWindow(session.window, filepath);
+      // Wait for Claude to process the image paste
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
+
+  // Send the text message
+  if (messageText.trim()) {
+    console.log(`[${new Date().toISOString()}] Sending text: ${messageText.substring(0, 50)}...`);
+    await sendToWindow(session.window, messageText);
+  }
 
   // Add eyes reaction and track which message for removal by hook
   await addReaction(channel, message.ts, 'eyes');
@@ -758,9 +868,11 @@ async function handleBotCommand(text, channel, say) {
 
 // Handle direct messages to the bot
 app.message(async ({ message, say }) => {
-  // Ignore bot messages and message subtypes (edits, deletes, etc.)
+
+  // Ignore bot messages and most message subtypes (edits, deletes, etc.)
+  // But allow file_share subtype for file attachments
   if (message.bot_id) return;
-  if (message.subtype) return;
+  if (message.subtype && message.subtype !== 'file_share') return;
   if (!message.user) return;
 
   // Check if user is allowed (optional security)
