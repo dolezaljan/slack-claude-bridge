@@ -789,7 +789,8 @@ function formatHelpMessage() {
     `• \`!sessions\` or \`!s\` - List active sessions\n` +
     `• \`!status\` - Show bridge status\n` +
     `• \`!find <name>\` or \`!f\` - Find project directories\n` +
-    `• \`!kill <window>\` - Terminate a session\n` +
+    `• \`!kill <window>\` - Terminate a session by window name\n` +
+    `• \`!kill\` (in thread) - Terminate current session\n` +
     `• \`!help\` - Show this help\n\n` +
     `To start a Claude session, just send a message (creates new thread).\n` +
     `Use \`[/path]\` prefix to set a custom working directory.`;
@@ -937,6 +938,18 @@ app.message(async ({ message, say }) => {
   // Check if this thread is a Claude session
   const sessions = loadSessions();
   const isClaudeSession = isThread && sessions[message.thread_ts];
+
+  // Special case: !kill within a Claude session kills that session
+  if (text.toLowerCase() === '!kill' && isClaudeSession) {
+    const session = sessions[message.thread_ts];
+    if (session && session.status !== 'terminated') {
+      terminateSession(message.thread_ts, session);
+      await say({ text: ':skull: Session terminated.', thread_ts: message.thread_ts });
+    } else {
+      await say({ text: ':information_source: Session already terminated.', thread_ts: message.thread_ts });
+    }
+    return;
+  }
 
   // Handle bot commands:
   // - In main conversation: always handle, respond in new thread
