@@ -1,6 +1,6 @@
 import Bolt from '@slack/bolt';
 import { execSync } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, createWriteStream, rmSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, createWriteStream, rmSync, readdirSync } from 'fs';
 import { pipeline } from 'stream/promises';
 import { createHash } from 'crypto';
 
@@ -8,6 +8,21 @@ const { App } = Bolt;
 
 // Configuration
 const CONFIG_DIR = process.env.HOME + '/.claude/slack-bridge';
+
+// Timing constants (milliseconds)
+const TIMING = {
+  CLAUDE_READY_TIMEOUT: 15000,      // Max wait for Claude to show prompt
+  CLAUDE_READY_POLL: 300,           // Poll interval when waiting for Claude
+  CLAUDE_READY_SETTLE: 200,         // Extra wait after Claude ready for UI stability
+  TRUST_PROMPT_DELAY: 2000,         // Delay before auto-confirming trust prompt
+  FILE_PASTE_DELAY: 1000,           // Wait between file pastes for Claude to process
+  ENTER_KEY_DELAY: 100,             // Delay before sending second Enter
+  WINDOW_CREATE_DELAY: 100,         // Wait for tmux window creation
+  FILE_DOWNLOAD_TIMEOUT: 30000,     // Timeout for downloading Slack files
+  IDLE_CHECK_INTERVAL: 60000,       // How often to check for idle sessions
+  HEALTH_CHECK_INTERVAL: 30000,     // How often to check for crashed sessions
+  TEMP_CLEANUP_INTERVAL: 86400000,  // How often to clean temp files (24h)
+};
 const SESSIONS_FILE = '/tmp/claude-slack-sessions.json';
 const SESSIONS_LOCK = '/tmp/claude-slack-sessions.lock';
 
@@ -29,6 +44,8 @@ function loadConfig() {
   config.multiSession.notifyOnTimeout = config.multiSession.notifyOnTimeout || false;
   config.multiSession.tmuxSession = config.multiSession.tmuxSession || 'claude';
   config.multiSession.defaultWorkingDir = config.multiSession.defaultWorkingDir || '~';
+  // How long to keep temp files (downloaded attachments) before cleanup
+  config.multiSession.tempFileRetentionDays = config.multiSession.tempFileRetentionDays || 14;
 
   return config;
 }
@@ -98,7 +115,24 @@ let workspaceUrl = '';
 // ============================================
 
 // Track window index for temporary names (start at 1 since window 0 is bridge)
-let windowIndex = 1;
+// Initialize by scanning existing windows to avoid conflicts after restart
+function initWindowIndex() {
+  let maxIndex = 0;
+  try {
+    const windows = execSync(`tmux list-windows -t ${TMUX_SESSION} -F '#{window_name}' 2>/dev/null`, { encoding: 'utf-8' });
+    for (const name of windows.split('\n')) {
+      const match = name.match(/^new-(\d+)$/);
+      if (match) {
+        maxIndex = Math.max(maxIndex, parseInt(match[1], 10));
+      }
+    }
+  } catch {
+    // tmux session may not exist yet
+  }
+  return maxIndex + 1;
+}
+
+let windowIndex = initWindowIndex();
 
 // In-memory lock to prevent duplicate session creation
 const creatingSession = new Map();  // threadTs → Promise
@@ -209,9 +243,9 @@ function capturePaneContent(windowName) {
 }
 
 // Wait for Claude to be ready (shows prompt after trust prompt is confirmed)
-async function waitForClaudeReady(windowName, maxWaitMs = 15000) {
+async function waitForClaudeReady(windowName, maxWaitMs = TIMING.CLAUDE_READY_TIMEOUT) {
   const startTime = Date.now();
-  const pollInterval = 300;
+  const pollInterval = TIMING.CLAUDE_READY_POLL;
 
   while (Date.now() - startTime < maxWaitMs) {
     const content = capturePaneContent(windowName);
@@ -227,8 +261,8 @@ async function waitForClaudeReady(windowName, maxWaitMs = 15000) {
         content.includes('❯') ||            // Prompt ready
         content.includes('What would you like to do?')) {  // Initial prompt
       console.log(`[${new Date().toISOString()}] Claude ready in window ${windowName}`);
-      // Wait 200ms more for UI to stabilize before sending input
-      await new Promise(resolve => setTimeout(resolve, 200));
+      // Wait for UI to stabilize before sending input
+      await new Promise(resolve => setTimeout(resolve, TIMING.CLAUDE_READY_SETTLE));
       return true;
     }
 
@@ -256,7 +290,7 @@ async function sendToWindow(windowName, text) {
   execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} -l '${escaped}'`);
   execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} Enter`);
   // Wait and send second Enter for paste mode handling
-  await new Promise(resolve => setTimeout(resolve, 100));
+  await new Promise(resolve => setTimeout(resolve, TIMING.ENTER_KEY_DELAY));
   try {
     execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} Enter`);
     console.log(`[${new Date().toISOString()}] Message sent successfully to ${windowName}`);
@@ -372,9 +406,21 @@ async function downloadSlackFile(file, threadTs) {
   }
 
   // Download with auth
-  const response = await fetch(file.url_private_download, {
-    headers: { 'Authorization': `Bearer ${config.botToken}` }
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TIMING.FILE_DOWNLOAD_TIMEOUT);
+
+  let response;
+  try {
+    response = await fetch(file.url_private_download, {
+      headers: { 'Authorization': `Bearer ${config.botToken}` },
+      signal: controller.signal
+    });
+  } catch (e) {
+    clearTimeout(timeout);
+    console.error(`Failed to download ${file.name}: ${e.message}`);
+    return null;
+  }
+  clearTimeout(timeout);
 
   if (!response.ok) {
     console.error(`Failed to download ${file.name}: ${response.status}`);
@@ -401,7 +447,7 @@ async function createSession(threadTs, channel, workingDir) {
   execSync(`tmux new-window -d -t ${TMUX_SESSION}: -n ${tempWindowName}`);
 
   // Small delay to ensure window is fully created
-  await new Promise(resolve => setTimeout(resolve, 100));
+  await new Promise(resolve => setTimeout(resolve, TIMING.WINDOW_CREATE_DELAY));
 
   // Change to working directory first (use double quotes for paths with spaces)
   if (workingDir) {
@@ -419,7 +465,7 @@ async function createSession(threadTs, channel, workingDir) {
     } catch (e) {
       // Window may have closed or Claude not ready yet
     }
-  }, 2000);
+  }, TIMING.TRUST_PROMPT_DELAY);
 
   return {
     window: tempWindowName,  // Will be updated to 8-char session_id by hook
@@ -440,7 +486,7 @@ async function resurrectSession(threadTs, channel, fullSessionId, workingDir) {
   execSync(`tmux new-window -d -t ${TMUX_SESSION}: -n ${tempWindowName}`);
 
   // Small delay to ensure window is fully created
-  await new Promise(resolve => setTimeout(resolve, 100));
+  await new Promise(resolve => setTimeout(resolve, TIMING.WINDOW_CREATE_DELAY));
 
   // Change to working directory (use stored dir from original session)
   const sessions = loadSessions();
@@ -458,7 +504,7 @@ async function resurrectSession(threadTs, channel, fullSessionId, workingDir) {
     } catch (e) {
       // Window may have closed or Claude not ready yet
     }
-  }, 2000);
+  }, TIMING.TRUST_PROMPT_DELAY);
 
   return {
     window: tempWindowName,  // Will be renamed to 8-char session_id by hook
@@ -480,16 +526,8 @@ function terminateSession(threadTs, session) {
     // Window may already be gone
   }
 
-  // Clean up temp files for this session
-  const tempDir = `/tmp/claude-slack-files/${threadTs}`;
-  try {
-    if (existsSync(tempDir)) {
-      rmSync(tempDir, { recursive: true });
-      console.log(`[${new Date().toISOString()}] Cleaned up temp files: ${tempDir}`);
-    }
-  } catch (e) {
-    console.error(`Failed to clean up temp files: ${e.message}`);
-  }
+  // Note: temp files are NOT deleted here to allow session resurrection
+  // Old temp files are cleaned up by startTempFileCleanupInterval()
 
   // Update session status
   const sessions = loadSessions();
@@ -524,7 +562,7 @@ function startCleanupInterval() {
         }
       }
     }
-  }, 60000); // Check every minute
+  }, TIMING.IDLE_CHECK_INTERVAL);
 }
 
 // ============================================
@@ -566,7 +604,59 @@ function startHealthCheckInterval() {
     if (changed) {
       saveSessions(sessions);
     }
-  }, 30000); // Check every 30 seconds
+  }, TIMING.HEALTH_CHECK_INTERVAL);
+}
+
+// ============================================
+// Temp File Cleanup
+// ============================================
+
+const TEMP_FILES_DIR = '/tmp/claude-slack-files';
+
+function startTempFileCleanupInterval() {
+  // Run cleanup once at startup
+  cleanupOldTempFiles();
+
+  // Then run periodically
+  setInterval(cleanupOldTempFiles, TIMING.TEMP_CLEANUP_INTERVAL);
+}
+
+function cleanupOldTempFiles() {
+  if (!existsSync(TEMP_FILES_DIR)) return;
+
+  const retentionDays = config.multiSession.tempFileRetentionDays;
+  const maxAgeMs = retentionDays * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  let cleanedCount = 0;
+
+  try {
+    const dirs = readdirSync(TEMP_FILES_DIR);
+
+    for (const dir of dirs) {
+      const dirPath = `${TEMP_FILES_DIR}/${dir}`;
+
+      try {
+        const stat = statSync(dirPath);
+        if (!stat.isDirectory()) continue;
+
+        const age = now - stat.mtimeMs;
+
+        if (age > maxAgeMs) {
+          rmSync(dirPath, { recursive: true, force: true });
+          cleanedCount++;
+          console.log(`[${new Date().toISOString()}] Cleaned up old temp dir: ${dir} (age: ${Math.round(age / 86400000)} days)`);
+        }
+      } catch (e) {
+        // Ignore individual directory errors
+      }
+    }
+
+    if (cleanedCount > 0) {
+      console.log(`[${new Date().toISOString()}] Temp file cleanup: removed ${cleanedCount} directories older than ${retentionDays} days`);
+    }
+  } catch (e) {
+    console.error(`[${new Date().toISOString()}] Temp file cleanup error: ${e.message}`);
+  }
 }
 
 // ============================================
@@ -683,12 +773,11 @@ async function handleMessage(message, channel, say) {
   // Check if session was just created (need to wait for trust prompt)
   const isNewSession = session.status === 'starting';
 
-  // Update activity timestamp
+  // Update activity timestamp (save deferred until after message processing)
   session.last_activity = new Date().toISOString();
   session.idle_since = null;
   session.status = session.status === 'starting' ? 'starting' : 'active';
   sessions[threadTs] = session;
-  saveSessions(sessions);
 
   // Handle file attachments
   let filePaths = [];
@@ -733,7 +822,7 @@ async function handleMessage(message, channel, say) {
       console.log(`[${new Date().toISOString()}] Sending file: ${filepath}`);
       await sendToWindow(session.window, filepath);
       // Wait for Claude to process the image paste
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, TIMING.FILE_PASTE_DELAY));
     }
   }
 
@@ -746,9 +835,9 @@ async function handleMessage(message, channel, say) {
   // Add eyes reaction and track which message for removal by hook
   await addReaction(channel, message.ts, 'eyes');
 
-  // Store message_ts so hook can remove eyes on Stop
+  // Store message_ts so hook can remove eyes on Stop, then save all updates
   sessions[threadTs].lastMessageTs = message.ts;
-  saveSessions(sessions);
+  saveSessions(sessions);  // Single save for activity + lastMessageTs
 }
 
 // ============================================
@@ -844,7 +933,6 @@ function findDirectories(query) {
   }
 
   try {
-    const home = process.env.HOME;
     const result = execSync(
       `find ~ -maxdepth 4 -type d -iname "*${safeQuery}*" 2>/dev/null | head -20`,
       { encoding: 'utf-8', timeout: 10000 }
@@ -855,7 +943,7 @@ function findDirectories(query) {
     }
 
     const paths = result.split('\n')
-      .map(p => p.replace(home, '~'))
+      .map(p => p.replace(process.env.HOME, '~'))
       .slice(0, 10);
 
     return { success: true, paths, message: `:mag: Found ${paths.length} matching "${query}":` };
@@ -1204,6 +1292,9 @@ app.command('/claude-help', async ({ command, ack, respond }) => {
 
   // Start crash detection health check
   startHealthCheckInterval();
+
+  // Start temp file cleanup (removes files older than 2 weeks)
+  startTempFileCleanupInterval();
 
   // Start the Slack app
   await app.start();

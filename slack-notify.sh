@@ -6,9 +6,8 @@ CONFIG_FILE="$HOME/.claude/slack-bridge/config.json"
 SESSIONS_FILE="/tmp/claude-slack-sessions.json"
 SESSIONS_LOCK="/tmp/claude-slack-sessions.lock"
 TMUX_SESSION="${CLAUDE_TMUX_SESSION:-claude}"
-LAST_SENT_HASH_FILE="/tmp/claude-slack-last-sent-hash"
-LAST_SENT_TIME_FILE="/tmp/claude-slack-last-sent-time"
 COOLDOWN_SECONDS=3
+# Note: LAST_SENT_HASH_FILE and LAST_SENT_TIME_FILE are set per-session after THREAD_TS is determined
 
 # Load bot token from config
 if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -88,6 +87,11 @@ if [[ -z "$CHANNEL" ]]; then
   echo "Error: No channel found for session" >&2
   exit 1
 fi
+
+# Set per-session hash/cooldown files (use THREAD_TS or window name as identifier)
+SESSION_KEY="${THREAD_TS:-$CURRENT_WINDOW}"
+LAST_SENT_HASH_FILE="/tmp/claude-slack-last-sent-hash-${SESSION_KEY}"
+LAST_SENT_TIME_FILE="/tmp/claude-slack-last-sent-time-${SESSION_KEY}"
 
 # Capture permission prompt from bottom of terminal
 capture_permission_prompt() {
@@ -207,6 +211,20 @@ json_escape() {
   echo "$text"
 }
 
+# Update sessions.json atomically with file locking
+# Usage: update_session "jq_filter" [--arg name value]...
+update_session() {
+  [[ -z "$THREAD_TS" || ! -f "$SESSIONS_FILE" ]] && return 1
+
+  local jq_filter="$1"
+  shift
+
+  flock "$SESSIONS_LOCK" -c "
+    TMP_FILE=\$(mktemp)
+    jq --arg ts \"$THREAD_TS\" $* '$jq_filter' \"$SESSIONS_FILE\" > \"\$TMP_FILE\" && mv \"\$TMP_FILE\" \"$SESSIONS_FILE\"
+  "
+}
+
 # Build message based on event type
 INCLUDE_RESPONSE=false
 INCLUDE_PROMPT=false
@@ -216,16 +234,9 @@ case "$EVENT_TYPE" in
     NOTIFICATION_TYPE=$(echo "$INPUT" | jq -r '.notification_type // .matcher // "unknown"')
     case "$NOTIFICATION_TYPE" in
       "idle_prompt")
-        # Update session status to idle (with file locking)
-        if [[ -n "$THREAD_TS" && -f "$SESSIONS_FILE" ]]; then
-          IDLE_TIME=$(date -Iseconds)
-          flock "$SESSIONS_LOCK" -c "
-            TMP_FILE=\$(mktemp)
-            jq --arg ts \"$THREAD_TS\" --arg idle \"$IDLE_TIME\" \
-              '.[\$ts].status = \"idle\" | .[\$ts].idle_since = \$idle' \
-              \"$SESSIONS_FILE\" > \"\$TMP_FILE\" && mv \"\$TMP_FILE\" \"$SESSIONS_FILE\"
-          "
-        fi
+        # Update session status to idle
+        IDLE_TIME=$(date -Iseconds)
+        update_session '.[$ts].status = "idle" | .[$ts].idle_since = $idle' "--arg idle \"$IDLE_TIME\""
         # Don't send notification to Slack - Stop event already notifies
         exit 0
         ;;
@@ -248,15 +259,9 @@ case "$EVENT_TYPE" in
       # Update CURRENT_WINDOW to the new name for capture functions
       CURRENT_WINDOW="$SESSION_ID"
 
-      # Update sessions.json with new window name and full session ID (with file locking)
-      if [[ -n "$THREAD_TS" && -f "$SESSIONS_FILE" ]]; then
-        flock "$SESSIONS_LOCK" -c "
-          TMP_FILE=\$(mktemp)
-          jq --arg ts \"$THREAD_TS\" --arg sid \"$SESSION_ID\" --arg sidfull \"$SESSION_ID_FULL\" \
-            '.[\$ts].window = \$sid | .[\$ts].sessionId = \$sidfull | .[\$ts].status = \"active\"' \
-            \"$SESSIONS_FILE\" > \"\$TMP_FILE\" && mv \"\$TMP_FILE\" \"$SESSIONS_FILE\"
-        "
-      fi
+      # Update sessions.json with new window name and full session ID
+      update_session '.[$ts].window = $sid | .[$ts].sessionId = $sidfull | .[$ts].status = "active"' \
+        "--arg sid \"$SESSION_ID\" --arg sidfull \"$SESSION_ID_FULL\""
     fi
 
     # Remove eyes reaction from the message that triggered this response
@@ -270,11 +275,7 @@ case "$EVENT_TYPE" in
           -d "{\"channel\": \"$CHANNEL\", \"name\": \"eyes\", \"timestamp\": \"$LAST_MSG_TS\"}" > /dev/null
 
         # Clear lastMessageTs
-        flock "$SESSIONS_LOCK" -c "
-          TMP_FILE=\$(mktemp)
-          jq --arg ts \"$THREAD_TS\" 'del(.[\$ts].lastMessageTs)' \
-            \"$SESSIONS_FILE\" > \"\$TMP_FILE\" && mv \"\$TMP_FILE\" \"$SESSIONS_FILE\"
-        "
+        update_session 'del(.[$ts].lastMessageTs)'
       fi
     fi
 
@@ -394,15 +395,8 @@ else
 fi
 
 # Update session last_activity timestamp (message forwarded to Slack)
-if [[ -n "$THREAD_TS" && -f "$SESSIONS_FILE" ]]; then
-  ACTIVITY_TIME=$(date -Iseconds)
-  flock "$SESSIONS_LOCK" -c "
-    TMP_FILE=\$(mktemp)
-    jq --arg ts \"$THREAD_TS\" --arg activity \"$ACTIVITY_TIME\" \
-      '.[\$ts].last_activity = \$activity' \
-      \"$SESSIONS_FILE\" > \"\$TMP_FILE\" && mv \"\$TMP_FILE\" \"$SESSIONS_FILE\"
-  "
-fi
+ACTIVITY_TIME=$(date -Iseconds)
+update_session '.[$ts].last_activity = $activity' "--arg activity \"$ACTIVITY_TIME\""
 
 # Store hash and timestamp to prevent duplicates
 echo "$CONTENT_HASH" > "$LAST_SENT_HASH_FILE"

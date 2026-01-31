@@ -2,8 +2,15 @@
 # Claude Code Slack Bridge - Start Script
 
 BRIDGE_DIR="$HOME/.claude/slack-bridge"
-TMUX_SESSION="claude"
+CONFIG_FILE="$BRIDGE_DIR/config.json"
 LOG_FILE="/tmp/slack-bridge.log"
+
+# Read tmux session name from config, default to "claude"
+if [[ -f "$CONFIG_FILE" ]] && command -v jq &>/dev/null; then
+  TMUX_SESSION=$(jq -r '.multiSession.tmuxSession // "claude"' "$CONFIG_FILE")
+else
+  TMUX_SESSION="claude"
+fi
 
 # Colors
 RED='\033[0;31m'

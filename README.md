@@ -89,7 +89,8 @@ Optional multi-session settings (defaults shown):
     "idleTimeoutMinutes": 60,
     "tmuxSession": "claude",
     "defaultWorkingDir": "~",
-    "notifyOnTimeout": false
+    "notifyOnTimeout": false,
+    "tempFileRetentionDays": 14
   }
 }
 ```
