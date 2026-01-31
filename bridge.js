@@ -25,6 +25,8 @@ function loadConfig() {
   config.multiSession = config.multiSession || {};
   config.multiSession.maxConcurrent = config.multiSession.maxConcurrent || 5;
   config.multiSession.idleTimeoutMinutes = config.multiSession.idleTimeoutMinutes || 60;
+  // Whether to notify when session times out (default: false)
+  config.multiSession.notifyOnTimeout = config.multiSession.notifyOnTimeout || false;
   config.multiSession.tmuxSession = config.multiSession.tmuxSession || 'claude';
   config.multiSession.defaultWorkingDir = config.multiSession.defaultWorkingDir || '~';
 
@@ -302,8 +304,10 @@ async function addReaction(channel, timestamp, emoji) {
   }
 }
 
-// Notify user that session has ended
+// Notify user that session has ended (if enabled)
 async function notifySessionEnded(channel, threadTs) {
+  if (!config.multiSession.notifyOnTimeout) return;
+
   try {
     await app.client.chat.postMessage({
       channel: channel,

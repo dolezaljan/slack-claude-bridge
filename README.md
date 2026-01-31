@@ -88,7 +88,8 @@ Optional multi-session settings (defaults shown):
     "maxConcurrent": 5,
     "idleTimeoutMinutes": 60,
     "tmuxSession": "claude",
-    "defaultWorkingDir": "~"
+    "defaultWorkingDir": "~",
+    "notifyOnTimeout": false
   }
 }
 ```
