@@ -523,10 +523,13 @@ async function createSession(threadTs, channel, workingDir) {
   const env = `CLAUDE_THREAD_TS=${threadTs} CLAUDE_SLACK_CHANNEL=${channel}`;
   execSync(`tmux send-keys -t ${TMUX_SESSION}:${tempWindowName} '${env} claude' Enter`);
 
-  // Auto-confirm trust prompt after Claude starts (user specified this directory)
+  // Auto-confirm trust prompt after Claude starts (only if trust prompt is showing)
   setTimeout(() => {
     try {
-      execSync(`tmux send-keys -t ${TMUX_SESSION}:${tempWindowName} '1'`);
+      const content = capturePaneContent(tempWindowName);
+      if (content.includes('trust this folder') || content.includes('Yes, I trust')) {
+        execSync(`tmux send-keys -t ${TMUX_SESSION}:${tempWindowName} '1'`);
+      }
     } catch (e) {
       // Window may have closed or Claude not ready yet
     }
@@ -562,10 +565,13 @@ async function resurrectSession(threadTs, channel, fullSessionId, workingDir) {
   const env = `CLAUDE_THREAD_TS=${threadTs} CLAUDE_SLACK_CHANNEL=${channel}`;
   execSync(`tmux send-keys -t ${TMUX_SESSION}:${tempWindowName} '${env} claude --resume ${fullSessionId}' Enter`);
 
-  // Auto-confirm trust prompt if shown
+  // Auto-confirm trust prompt if shown (only if trust prompt is actually visible)
   setTimeout(() => {
     try {
-      execSync(`tmux send-keys -t ${TMUX_SESSION}:${tempWindowName} '1'`);
+      const content = capturePaneContent(tempWindowName);
+      if (content.includes('trust this folder') || content.includes('Yes, I trust')) {
+        execSync(`tmux send-keys -t ${TMUX_SESSION}:${tempWindowName} '1'`);
+      }
     } catch (e) {
       // Window may have closed or Claude not ready yet
     }
