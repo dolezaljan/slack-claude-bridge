@@ -6,7 +6,9 @@
 
 ---
 
-Bidirectional bridge between Slack and Claude Code. Send messages to Claude via Slack DM or @mentions, receive responses in threads. Control your AI coding assistant from anywhere - meetings, commutes, or *strategic thinking sessions*.
+**Requires [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** - Anthropic's official AI coding assistant for the terminal.
+
+Bidirectional bridge between Slack and Claude Code CLI. Send messages to Claude via Slack DM or @mentions, receive responses in threads. Control your AI coding assistant from anywhere - meetings, commutes, or *strategic thinking sessions*.
 
 Supports multiple concurrent sessions, file/image attachments, and automatic session management.
 
