@@ -21,6 +21,25 @@ Each Slack thread gets its own Claude Code session in a separate tmux window.
 
 ## Setup
 
+### Quick Install
+
+After creating your Slack app (steps 1-6 below), run the install script:
+
+```bash
+cd ~/.claude/slack-bridge
+./install.sh
+```
+
+The script will:
+- Install npm dependencies
+- Prompt for your Slack credentials
+- Create symlinks for hooks and commands
+- Configure Claude Code hooks
+
+### Manual Setup
+
+If you prefer manual setup, follow these steps:
+
 ### 1. Create Slack App
 
 1. Go to https://api.slack.com/apps → **Create New App** → **From scratch**
@@ -37,6 +56,7 @@ Go to **OAuth & Permissions** → **Scopes** → **Bot Token Scopes**, add:
 - `reactions:read` - Read reactions
 - `app_mentions:read` - Receive @mentions
 - `files:read` - Download file attachments
+- `files:write` - Upload files to Slack
 
 ### 3. Enable Socket Mode
 
