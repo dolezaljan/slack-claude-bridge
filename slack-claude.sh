@@ -166,6 +166,22 @@ find_session_by_prefix() {
   echo "$matches"
 }
 
+# Get session summary from Claude's sessions index
+get_session_summary() {
+  local dir="$1"
+  local session_id="$2"
+  local index_file
+  index_file=$(get_sessions_index "$dir")
+
+  if [[ ! -f "$index_file" ]]; then
+    return 1
+  fi
+
+  jq -r --arg sid "$session_id" '
+    .entries[] | select(.sessionId == $sid) | .summary // .firstPrompt // empty
+  ' "$index_file" 2>/dev/null | head -1
+}
+
 # Find Slack thread for a Claude session ID
 find_thread_for_session() {
   local session_id="$1"
@@ -363,7 +379,13 @@ if [[ -n "$RESUME_MODE" ]]; then
   if [[ "$RESUME_MODE" == "continue" ]]; then
     SESSION_DESC="Resuming last session"
   else
-    SESSION_DESC="Resuming session ${RESUME_ID:0:8}"
+    # Try to get session summary for a more meaningful message
+    SESSION_SUMMARY=$(get_session_summary "$WORKING_DIR" "$RESUME_ID")
+    if [[ -n "$SESSION_SUMMARY" ]]; then
+      SESSION_DESC="Resuming: $SESSION_SUMMARY"
+    else
+      SESSION_DESC="Resuming session ${RESUME_ID:0:8}"
+    fi
   fi
   if [[ -z "$MESSAGE" ]]; then
     FULL_MESSAGE="[$DIR_DISPLAY] $SESSION_DESC"
