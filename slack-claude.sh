@@ -166,6 +166,30 @@ find_session_by_prefix() {
   echo "$matches"
 }
 
+# Find Slack thread for a Claude session ID
+find_thread_for_session() {
+  local session_id="$1"
+
+  if [[ ! -f "$SESSIONS_FILE" ]]; then
+    return 1
+  fi
+
+  # Look for session by full ID or prefix match
+  local result
+  result=$(jq -r --arg sid "$session_id" '
+    to_entries[]
+    | select(.value.sessionId != null and (.value.sessionId == $sid or (.value.sessionId | startswith($sid))))
+    | "\(.key)|\(.value.channel)"
+  ' "$SESSIONS_FILE" 2>/dev/null | head -1)
+
+  if [[ -n "$result" && "$result" != "|" ]]; then
+    echo "$result"
+    return 0
+  fi
+
+  return 1
+}
+
 # Ensure tmux session and bridge are running
 ensure_bridge_running() {
   local tmux_session="$1"
@@ -368,13 +392,37 @@ echo "  Directory: $DIR_DISPLAY"
 # Ensure tmux session and bridge are running
 ensure_bridge_running "$TMUX_SESSION"
 
+# When resuming, try to find the original Slack thread
+THREAD_TS=""
+if [[ "$RESUME_MODE" == "resume" && -n "$RESUME_ID" ]]; then
+  echo "  Looking up original Slack thread..."
+  THREAD_INFO=$(find_thread_for_session "$RESUME_ID")
+  if [[ -n "$THREAD_INFO" ]]; then
+    THREAD_TS=$(echo "$THREAD_INFO" | cut -d'|' -f1)
+    FOUND_CHANNEL=$(echo "$THREAD_INFO" | cut -d'|' -f2)
+    if [[ -n "$FOUND_CHANNEL" ]]; then
+      CHANNEL="$FOUND_CHANNEL"
+    fi
+    echo "  Found original thread: $THREAD_TS"
+  fi
+fi
+
 echo "  Posting to Slack..."
+
+# Build Slack message payload
+if [[ -n "$THREAD_TS" ]]; then
+  # Reply to existing thread
+  PAYLOAD="{\"channel\": \"$CHANNEL\", \"text\": \"$FULL_MESSAGE\", \"thread_ts\": \"$THREAD_TS\"}"
+else
+  # Start new thread
+  PAYLOAD="{\"channel\": \"$CHANNEL\", \"text\": \"$FULL_MESSAGE\"}"
+fi
 
 # Post message to Slack
 RESPONSE=$(curl -s -X POST "https://slack.com/api/chat.postMessage" \
   -H "Authorization: Bearer $BOT_TOKEN" \
   -H "Content-type: application/json" \
-  -d "{\"channel\": \"$CHANNEL\", \"text\": \"$FULL_MESSAGE\"}")
+  -d "$PAYLOAD")
 
 OK=$(echo "$RESPONSE" | jq -r '.ok')
 if [[ "$OK" != "true" ]]; then
@@ -383,7 +431,10 @@ if [[ "$OK" != "true" ]]; then
   exit 1
 fi
 
-THREAD_TS=$(echo "$RESPONSE" | jq -r '.ts')
+# For new threads, capture the thread_ts
+if [[ -z "$THREAD_TS" ]]; then
+  THREAD_TS=$(echo "$RESPONSE" | jq -r '.ts')
+fi
 echo "  Thread: $THREAD_TS"
 
 # Generate window name
@@ -443,22 +494,38 @@ if [[ -n "$MESSAGE" ]]; then
   fi
 fi
 
-# Register session in sessions.json
+# Register/update session in sessions.json
 echo "  Registering session..."
 CREATED_AT=$(date -Iseconds)
-flock "$SESSIONS_LOCK" -c "
-  if [[ ! -f '$SESSIONS_FILE' ]]; then
-    echo '{}' > '$SESSIONS_FILE'
-  fi
-  TMP_FILE=\$(mktemp)
-  jq --arg ts '$THREAD_TS' \
-     --arg ch '$CHANNEL' \
-     --arg win '$WINDOW_NAME' \
-     --arg dir '$WORKING_DIR' \
-     --arg created '$CREATED_AT' \
-     '.[\$ts] = {channel: \$ch, window: \$win, workingDir: \$dir, status: \"active\", created_at: \$created}' \
-     '$SESSIONS_FILE' > \"\$TMP_FILE\" && mv \"\$TMP_FILE\" '$SESSIONS_FILE'
-"
+if [[ "$RESUME_MODE" == "resume" && -n "$RESUME_ID" ]]; then
+  # Update existing session entry (preserve sessionId)
+  flock "$SESSIONS_LOCK" -c "
+    if [[ ! -f '$SESSIONS_FILE' ]]; then
+      echo '{}' > '$SESSIONS_FILE'
+    fi
+    TMP_FILE=\$(mktemp)
+    jq --arg ts '$THREAD_TS' \
+       --arg win '$WINDOW_NAME' \
+       --arg activity '$CREATED_AT' \
+       '.[\$ts].window = \$win | .[\$ts].status = \"active\" | .[\$ts].last_activity = \$activity | del(.[\$ts].idle_since)' \
+       '$SESSIONS_FILE' > \"\$TMP_FILE\" && mv \"\$TMP_FILE\" '$SESSIONS_FILE'
+  "
+else
+  # Create new session entry
+  flock "$SESSIONS_LOCK" -c "
+    if [[ ! -f '$SESSIONS_FILE' ]]; then
+      echo '{}' > '$SESSIONS_FILE'
+    fi
+    TMP_FILE=\$(mktemp)
+    jq --arg ts '$THREAD_TS' \
+       --arg ch '$CHANNEL' \
+       --arg win '$WINDOW_NAME' \
+       --arg dir '$WORKING_DIR' \
+       --arg created '$CREATED_AT' \
+       '.[\$ts] = {channel: \$ch, window: \$win, workingDir: \$dir, status: \"active\", created_at: \$created}' \
+       '$SESSIONS_FILE' > \"\$TMP_FILE\" && mv \"\$TMP_FILE\" '$SESSIONS_FILE'
+  "
+fi
 
 echo "  Window: $WINDOW_NAME"
 echo ""
