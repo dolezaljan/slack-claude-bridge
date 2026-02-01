@@ -279,21 +279,32 @@ async function sendToWindow(windowName, text) {
   // Check if this is an option with additional instructions (e.g., "1 but only this file" or "3 try something else")
   const optionParsed = parseOptionWithInstructions(text);
   if (optionParsed.hasInstructions) {
-    console.log(`[${new Date().toISOString()}] Option ${optionParsed.optionKey} with instructions: "${optionParsed.instructions.substring(0, 50)}..."`);
-    // Send the option key
-    execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} '${optionParsed.optionKey}'`);
-    // Wait for the option to be processed
-    await new Promise(resolve => setTimeout(resolve, 300));
+    const optionNum = parseInt(optionParsed.optionKey, 10);
+    console.log(`[${new Date().toISOString()}] Option ${optionNum} with instructions: "${optionParsed.instructions.substring(0, 50)}..."`);
+
+    // Navigate to the option using Down arrow (option 1 is default)
+    // Pressing digit immediately confirms, so we must use arrow navigation for Tab to work
+    if (optionNum > 1) {
+      for (let i = 1; i < optionNum; i++) {
+        execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} Down`);
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      // Small delay after navigation before Tab
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
     // Press Tab to open amendment input
     execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} Tab`);
-    // Wait for input to appear
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await new Promise(resolve => setTimeout(resolve, 500));
+
     // Type the instructions
     const escapedInstructions = optionParsed.instructions.replace(/'/g, "'\\''");
     execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} -l '${escapedInstructions}'`);
-    // Send Enter to submit
+
+    // Wait for text to be processed, then Enter to confirm
+    await new Promise(resolve => setTimeout(resolve, 500));
     execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} Enter`);
-    console.log(`[${new Date().toISOString()}] Option with instructions sent to ${windowName}`);
+    console.log(`[${new Date().toISOString()}] Option ${optionNum} with instructions sent to ${windowName}`);
     return;
   }
 
