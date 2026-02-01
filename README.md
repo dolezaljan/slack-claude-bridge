@@ -189,9 +189,10 @@ slack-claude [working_dir] [initial_message]
 
 Examples:
 ```bash
-slack-claude                              # Current dir
+slack-claude                              # Current dir, no message
 slack-claude ~/projects/myapp             # Specific directory
-slack-claude . "Fix the login bug"        # With initial message
+slack-claude . "Fix the login bug"        # Current dir with message
+slack-claude "Fix the login bug"          # Current dir with message (shorthand)
 ```
 
 This creates a Slack thread and opens the tmux window locally. You can then continue the conversation from either Slack (mobile) or the local terminal.
