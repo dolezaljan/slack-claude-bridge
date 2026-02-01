@@ -21,6 +21,13 @@ Each Slack thread gets its own Claude Code session in a separate tmux window.
 
 ## Setup
 
+### Clone the Repository
+
+```bash
+git clone https://github.com/dolezaljan/slack-bridge.git ~/.claude/slack-bridge
+cd ~/.claude/slack-bridge
+```
+
 ### Quick Install
 
 After creating your Slack app (steps 1-6 below), run the install script:
