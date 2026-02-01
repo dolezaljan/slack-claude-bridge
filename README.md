@@ -216,6 +216,8 @@ slack-claude --list ~/myapp               # List sessions with IDs
 
 This creates a Slack thread and opens the tmux window locally. You can then continue the conversation from either Slack (mobile) or the local terminal.
 
+**Auto-start**: `slack-claude` automatically creates the tmux session and starts the bridge if they're not running. No need to run `start.sh` first.
+
 **Session migration**: Using `--resume` with a session that wasn't previously connected to Slack will "migrate" it - a new thread is created and all new notifications will go there.
 
 **Listing sessions**: Use `--list` to see available sessions with their IDs:

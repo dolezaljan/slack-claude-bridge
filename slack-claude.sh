@@ -166,6 +166,65 @@ find_session_by_prefix() {
   echo "$matches"
 }
 
+# Ensure tmux session and bridge are running
+ensure_bridge_running() {
+  local tmux_session="$1"
+  local bridge_dir="$HOME/.claude/slack-bridge"
+  local log_file="/tmp/slack-bridge.log"
+
+  # Create tmux session if it doesn't exist
+  if ! tmux has-session -t "$tmux_session" 2>/dev/null; then
+    echo "  Creating tmux session '$tmux_session'..."
+    tmux new-session -d -s "$tmux_session" -n bridge -c "$bridge_dir"
+    tmux send-keys -t "$tmux_session:bridge" "node bridge.js 2>&1 | tee $log_file" Enter
+    sleep 2  # Wait for bridge to start
+    return 0
+  fi
+
+  # Check if bridge process is running
+  if pgrep -f "node bridge.js" > /dev/null; then
+    return 0  # Bridge already running
+  fi
+
+  # Bridge not running - start it
+  echo "  Starting bridge..."
+
+  # Check if bridge window exists
+  if tmux list-windows -t "$tmux_session" -F '#{window_name}' 2>/dev/null | grep -q '^bridge$'; then
+    # Window exists, just start the process
+    tmux send-keys -t "$tmux_session:bridge" "node bridge.js 2>&1 | tee $log_file" Enter
+  else
+    # Create bridge window
+    tmux new-window -t "$tmux_session:" -n bridge -c "$bridge_dir"
+
+    # Move to position 0 if possible
+    local bridge_idx
+    bridge_idx=$(tmux list-windows -t "$tmux_session" -F '#{window_index} #{window_name}' | grep ' bridge$' | cut -d' ' -f1)
+    if [[ "$bridge_idx" != "0" ]]; then
+      if tmux list-windows -t "$tmux_session" -F '#{window_index}' | grep -q '^0$'; then
+        tmux swap-window -s "$tmux_session:$bridge_idx" -t "$tmux_session:0" 2>/dev/null || true
+      else
+        tmux move-window -s "$tmux_session:$bridge_idx" -t "$tmux_session:0" 2>/dev/null || true
+      fi
+    fi
+
+    tmux send-keys -t "$tmux_session:bridge" "node bridge.js 2>&1 | tee $log_file" Enter
+  fi
+
+  # Wait for bridge to start
+  echo "  Waiting for bridge to connect..."
+  for i in {1..10}; do
+    if pgrep -f "node bridge.js" > /dev/null; then
+      sleep 1  # Extra time for Slack connection
+      return 0
+    fi
+    sleep 0.5
+  done
+
+  echo "  Warning: Bridge may not have started properly" >&2
+  return 1
+}
+
 # Load config
 if [[ ! -f "$CONFIG_FILE" ]]; then
   echo "Error: Config file not found: $CONFIG_FILE" >&2
@@ -305,6 +364,10 @@ else
   echo "Starting Claude session..."
 fi
 echo "  Directory: $DIR_DISPLAY"
+
+# Ensure tmux session and bridge are running
+ensure_bridge_running "$TMUX_SESSION"
+
 echo "  Posting to Slack..."
 
 # Post message to Slack
@@ -322,13 +385,6 @@ fi
 
 THREAD_TS=$(echo "$RESPONSE" | jq -r '.ts')
 echo "  Thread: $THREAD_TS"
-
-# Check tmux session exists
-if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-  echo "Error: tmux session '$TMUX_SESSION' not found" >&2
-  echo "Start it with: tmux new -s $TMUX_SESSION" >&2
-  exit 1
-fi
 
 # Generate window name (get next index from sessions file)
 WINDOW_INDEX=$(jq -r '[to_entries[].value.window | select(startswith("new-")) | ltrimstr("new-") | tonumber] | max // 0' "$SESSIONS_FILE" 2>/dev/null || echo "0")
