@@ -334,6 +334,40 @@ Claude sends status updates to the Slack thread:
 └── settings.json       # Claude hooks configuration
 ```
 
+## Git/SSH in tmux Sessions
+
+When running Claude inside tmux, SSH authentication may not work because the SSH agent socket from your login session isn't available. To fix this:
+
+**Option 1: GNOME Keyring (Linux with GNOME)**
+
+The GNOME keyring provides a persistent SSH agent:
+
+```bash
+SSH_AUTH_SOCK=/run/user/1000/gcr/ssh git push
+```
+
+Add to your shell config to make it automatic in tmux:
+```bash
+# ~/.bashrc or ~/.zshrc
+if [[ -n "$TMUX" ]]; then
+  export SSH_AUTH_SOCK=/run/user/$(id -u)/gcr/ssh
+fi
+```
+
+**Option 2: SSH Agent Forwarding**
+
+Start tmux with agent forwarding:
+```bash
+ssh-agent tmux new -s claude
+```
+
+**Option 3: Use HTTPS with gh CLI**
+
+Configure git to use GitHub CLI for authentication:
+```bash
+gh auth setup-git
+```
+
 ## Logs
 
 - Bridge output: visible in tmux `claude:bridge` window
