@@ -386,10 +386,16 @@ fi
 THREAD_TS=$(echo "$RESPONSE" | jq -r '.ts')
 echo "  Thread: $THREAD_TS"
 
-# Generate window name (get next index from sessions file)
-WINDOW_INDEX=$(jq -r '[to_entries[].value.window | select(startswith("new-")) | ltrimstr("new-") | tonumber] | max // 0' "$SESSIONS_FILE" 2>/dev/null || echo "0")
-WINDOW_INDEX=$((WINDOW_INDEX + 1))
-WINDOW_NAME="new-${WINDOW_INDEX}"
+# Generate window name
+if [[ "$RESUME_MODE" == "resume" && -n "$RESUME_ID" ]]; then
+  # Use short session ID for resumed sessions
+  WINDOW_NAME="${RESUME_ID:0:8}"
+else
+  # Use incremental index for new sessions
+  WINDOW_INDEX=$(jq -r '[to_entries[].value.window | select(startswith("new-")) | ltrimstr("new-") | tonumber] | max // 0' "$SESSIONS_FILE" 2>/dev/null || echo "0")
+  WINDOW_INDEX=$((WINDOW_INDEX + 1))
+  WINDOW_NAME="new-${WINDOW_INDEX}"
+fi
 
 echo "  Creating tmux window: $WINDOW_NAME"
 
