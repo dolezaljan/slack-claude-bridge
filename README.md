@@ -24,7 +24,7 @@ Each Slack thread gets its own Claude Code session in a separate tmux window.
 ### Clone the Repository
 
 ```bash
-git clone https://github.com/dolezaljan/slack-bridge.git ~/.claude/slack-bridge
+git clone https://github.com/dolezaljan/slack-claude-bridge.git ~/.claude/slack-bridge
 cd ~/.claude/slack-bridge
 ```
 
