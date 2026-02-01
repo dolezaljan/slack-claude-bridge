@@ -252,6 +252,9 @@ case "$EVENT_TYPE" in
         ;;
     esac
     ;;
+  "PreCompact")
+    MESSAGE=":hourglass_flowing_sand: Compacting conversation context..."
+    ;;
   "Stop")
     # Rename window if still has temporary name
     if [[ "$CURRENT_WINDOW" == new-* && "$SESSION_ID" != "unknown" ]]; then
