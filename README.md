@@ -164,6 +164,22 @@ Attach files to your Slack message - they'll be downloaded and passed to Claude:
 - **Documents**: PDF - Claude can read the content
 - **Code/Text**: Most text-based files (.js, .py, .md, etc.)
 
+### Uploading Files to Slack
+
+Claude can upload files back to the Slack thread using the upload script:
+
+```bash
+~/.claude/slack-upload.sh <file> [message]
+```
+
+Examples:
+```bash
+~/.claude/slack-upload.sh ./screenshot.png "Here's the result"
+~/.claude/slack-upload.sh /tmp/output.csv
+```
+
+The script automatically detects the current thread from environment variables or tmux window.
+
 ### Bot Commands
 
 Send these in DM (outside of Claude session threads):

@@ -920,6 +920,17 @@ function killSession(windowName) {
   return { success: true, message: `:skull: Session \`${windowName}\` terminated.` };
 }
 
+// Get git branch for a directory (returns null if not a git repo)
+function getGitBranch(dir) {
+  try {
+    const fullPath = dir.replace(/^~/, process.env.HOME);
+    const branch = execSync(`git -C "${fullPath}" rev-parse --abbrev-ref HEAD 2>/dev/null`, { encoding: 'utf-8' }).trim();
+    return branch || null;
+  } catch {
+    return null;
+  }
+}
+
 // Find directories matching query
 function findDirectories(query) {
   if (!query) {
@@ -943,7 +954,11 @@ function findDirectories(query) {
     }
 
     const paths = result.split('\n')
-      .map(p => p.replace(process.env.HOME, '~'))
+      .map(p => {
+        const displayPath = p.replace(process.env.HOME, '~');
+        const branch = getGitBranch(displayPath);
+        return { path: displayPath, branch };
+      })
       .slice(0, 10);
 
     return { success: true, paths, message: `:mag: Found ${paths.length} matching "${query}":` };
@@ -1001,7 +1016,10 @@ async function handleBotCommand(text, channel, say) {
     await say(result.message);
     if (result.success && result.paths.length > 0) {
       for (const p of result.paths) {
-        await say(p);
+        await say(p.path);
+        if (p.branch) {
+          await say(`:branch: ${p.branch}`);
+        }
       }
     }
     return true;
@@ -1267,7 +1285,14 @@ app.command('/claude-find', async ({ command, ack, respond }) => {
 
   const result = findDirectories(command.text.trim());
   if (result.paths.length > 0) {
-    await respond(`${result.message}\n${result.paths.map(p => `• \`${p}\``).join('\n')}`);
+    const lines = result.paths.map(p => {
+      let line = p.path;
+      if (p.branch) {
+        line += `\n:branch: ${p.branch}`;
+      }
+      return line;
+    });
+    await respond(`${result.message}\n${lines.join('\n')}`);
   } else {
     await respond(result.message);
   }

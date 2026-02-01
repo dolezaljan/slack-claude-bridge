@@ -237,10 +237,32 @@ case "$EVENT_TYPE" in
         # Update session status to idle
         IDLE_TIME=$(date -Iseconds)
         update_session '.[$ts].status = "idle" | .[$ts].idle_since = $idle' "--arg idle \"$IDLE_TIME\""
+        # Remove eyes reaction since Claude is now idle
+        if [[ -n "$THREAD_TS" && -f "$SESSIONS_FILE" ]]; then
+          LAST_MSG_TS=$(jq -r ".\"$THREAD_TS\".lastMessageTs // empty" "$SESSIONS_FILE")
+          if [[ -n "$LAST_MSG_TS" ]]; then
+            curl -s -X POST "https://slack.com/api/reactions.remove" \
+              -H "Authorization: Bearer $BOT_TOKEN" \
+              -H "Content-type: application/json" \
+              -d "{\"channel\": \"$CHANNEL\", \"name\": \"eyes\", \"timestamp\": \"$LAST_MSG_TS\"}" > /dev/null
+            update_session 'del(.[$ts].lastMessageTs)'
+          fi
+        fi
         # Don't send notification to Slack - Stop event already notifies
         exit 0
         ;;
       "permission_prompt")
+        # Remove eyes reaction since we're now waiting for user input
+        if [[ -n "$THREAD_TS" && -f "$SESSIONS_FILE" ]]; then
+          LAST_MSG_TS=$(jq -r ".\"$THREAD_TS\".lastMessageTs // empty" "$SESSIONS_FILE")
+          if [[ -n "$LAST_MSG_TS" ]]; then
+            curl -s -X POST "https://slack.com/api/reactions.remove" \
+              -H "Authorization: Bearer $BOT_TOKEN" \
+              -H "Content-type: application/json" \
+              -d "{\"channel\": \"$CHANNEL\", \"name\": \"eyes\", \"timestamp\": \"$LAST_MSG_TS\"}" > /dev/null
+            update_session 'del(.[$ts].lastMessageTs)'
+          fi
+        fi
         MESSAGE=":lock: Claude Code needs permission to proceed"
         INCLUDE_PROMPT=true
         ;;
