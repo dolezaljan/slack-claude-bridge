@@ -829,6 +829,12 @@ async function handleMessage(message, channel, say) {
     }
   }
 
+  // Add eyes reaction and store lastMessageTs BEFORE sending to Claude
+  // This prevents race condition where Claude responds before we save
+  await addReaction(channel, message.ts, 'eyes');
+  sessions[threadTs].lastMessageTs = message.ts;
+  saveSessions(sessions);
+
   // Send the text message
   if (messageText.trim()) {
     console.log(`[${new Date().toISOString()}] Sending text: ${messageText.substring(0, 50)}...`);
@@ -837,13 +843,6 @@ async function handleMessage(message, channel, say) {
     writeFileSync(`/tmp/claude-slack-pending-${threadTs}`, msgHash);
     await sendToWindow(session.window, messageText);
   }
-
-  // Add eyes reaction and track which message for removal by hook
-  await addReaction(channel, message.ts, 'eyes');
-
-  // Store message_ts so hook can remove eyes on Stop, then save all updates
-  sessions[threadTs].lastMessageTs = message.ts;
-  saveSessions(sessions);  // Single save for activity + lastMessageTs
 }
 
 // ============================================
