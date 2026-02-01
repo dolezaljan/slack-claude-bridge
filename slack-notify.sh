@@ -52,12 +52,19 @@ else
 fi
 
 # Lookup thread_ts and channel by session_id (window name) in sessions.json
+# Prefer active sessions over terminated ones, and most recent if multiple matches
 THREAD_TS=""
 CHANNEL=""
 if [[ -f "$SESSIONS_FILE" ]]; then
-  SESSION_DATA=$(jq -r "to_entries[] | select(.value.window == \"$SESSION_ID\" or .value.window == \"$CURRENT_WINDOW\") | \"\(.key)|\(.value.channel)\"" "$SESSIONS_FILE" | head -1)
-  THREAD_TS=$(echo "$SESSION_DATA" | cut -d'|' -f1)
-  CHANNEL=$(echo "$SESSION_DATA" | cut -d'|' -f2)
+  SESSION_DATA=$(jq -r "
+    [to_entries[] | select(.value.window == \"$SESSION_ID\" or .value.window == \"$CURRENT_WINDOW\")]
+    | sort_by(.value.status == \"active\" | not) | sort_by(.value.created_at) | reverse
+    | .[0] | \"\(.key)|\(.value.channel)\"
+  " "$SESSIONS_FILE" 2>/dev/null)
+  if [[ "$SESSION_DATA" != "null|null" && -n "$SESSION_DATA" ]]; then
+    THREAD_TS=$(echo "$SESSION_DATA" | cut -d'|' -f1)
+    CHANNEL=$(echo "$SESSION_DATA" | cut -d'|' -f2)
+  fi
 fi
 
 # Fallback to environment variables or default channel
