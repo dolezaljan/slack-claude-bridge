@@ -1,6 +1,7 @@
 {
   "name": "claude-slack-bridge",
   "version": "1.0.0",
+  "license": "MIT",
   "description": "Bridge Slack messages to Claude Code stdin via tmux",
   "main": "bridge.js",
   "type": "module",
