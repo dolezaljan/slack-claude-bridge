@@ -702,8 +702,6 @@ async function handleMessage(message, channel, say) {
 
   // Parse working directory from message (only for new threads)
   let messageText = message.text || '';
-  // Strip [slack-claude] marker if present (from user-initiated sessions)
-  messageText = messageText.replace(/\s*\[slack-claude\]\s*/g, '').trim();
   let workingDir = null;
   let dirWarning = null;
 
@@ -822,6 +820,9 @@ async function handleMessage(message, channel, say) {
     // Send each file path and wait for paste mode to complete
     for (const filepath of filePaths) {
       console.log(`[${new Date().toISOString()}] Sending file: ${filepath}`);
+      // Write pending file so hook knows this came from Slack (trim for consistent hash)
+      const fileHash = createHash('md5').update(filepath.trim()).digest('hex');
+      writeFileSync(`/tmp/claude-slack-pending-${threadTs}`, fileHash);
       await sendToWindow(session.window, filepath);
       // Wait for Claude to process the image paste
       await new Promise(resolve => setTimeout(resolve, TIMING.FILE_PASTE_DELAY));
@@ -831,6 +832,9 @@ async function handleMessage(message, channel, say) {
   // Send the text message
   if (messageText.trim()) {
     console.log(`[${new Date().toISOString()}] Sending text: ${messageText.substring(0, 50)}...`);
+    // Write pending file so hook knows this message came from Slack (trim for consistent hash)
+    const msgHash = createHash('md5').update(messageText.trim()).digest('hex');
+    writeFileSync(`/tmp/claude-slack-pending-${threadTs}`, msgHash);
     await sendToWindow(session.window, messageText);
   }
 
@@ -1045,9 +1049,7 @@ app.message(async ({ message, say }) => {
 
   // Ignore bot messages and most message subtypes (edits, deletes, etc.)
   // But allow file_share subtype for file attachments
-  // Exception: allow bot messages with [slack-claude] marker (user-initiated from host)
-  const isUserInitiated = message.text?.includes('[slack-claude]');
-  if (message.bot_id && !isUserInitiated) return;
+  if (message.bot_id) return;
   if (message.subtype && message.subtype !== 'file_share') return;
   if (!message.user) return;
 

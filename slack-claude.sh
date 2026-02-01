@@ -9,6 +9,7 @@
 
 CONFIG_FILE="$HOME/.claude/slack-bridge/config.json"
 SESSIONS_FILE="/tmp/claude-slack-sessions.json"
+SESSIONS_LOCK="/tmp/claude-slack-sessions.lock"
 
 # Load config
 if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -45,12 +46,12 @@ if [[ ! -d "$WORKING_DIR" ]]; then
 fi
 WORKING_DIR=$(cd "$WORKING_DIR" && pwd)
 
-# Build message with directory prefix and marker for bridge to recognize
+# Build message with directory prefix
 DIR_DISPLAY="${WORKING_DIR/#$HOME/~}"
 if [[ -z "$MESSAGE" ]]; then
-  FULL_MESSAGE="[$WORKING_DIR] Starting session [slack-claude]"
+  FULL_MESSAGE="[$DIR_DISPLAY] Starting session"
 else
-  FULL_MESSAGE="[$WORKING_DIR] $MESSAGE [slack-claude]"
+  FULL_MESSAGE="[$DIR_DISPLAY] $MESSAGE"
 fi
 
 echo "Starting Claude session..."
@@ -73,26 +74,74 @@ fi
 THREAD_TS=$(echo "$RESPONSE" | jq -r '.ts')
 echo "  Thread: $THREAD_TS"
 
-# Wait for bridge to create the session
-echo "  Waiting for bridge to create session..."
-WINDOW=""
-for i in {1..60}; do
-  if [[ -f "$SESSIONS_FILE" ]]; then
-    WINDOW=$(jq -r ".\"$THREAD_TS\".window // empty" "$SESSIONS_FILE" 2>/dev/null)
-    if [[ -n "$WINDOW" ]]; then
-      break
-    fi
-  fi
-  sleep 0.5
-done
-
-if [[ -z "$WINDOW" ]]; then
-  echo "Error: Timeout waiting for bridge to create session" >&2
-  echo "Is the bridge running? Check: ./start.sh" >&2
+# Check tmux session exists
+if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+  echo "Error: tmux session '$TMUX_SESSION' not found" >&2
+  echo "Start it with: tmux new -s $TMUX_SESSION" >&2
   exit 1
 fi
 
-echo "  Window: $WINDOW"
+# Generate window name (get next index from sessions file)
+WINDOW_INDEX=$(jq -r '[to_entries[].value.window | select(startswith("new-")) | ltrimstr("new-") | tonumber] | max // 0' "$SESSIONS_FILE" 2>/dev/null || echo "0")
+WINDOW_INDEX=$((WINDOW_INDEX + 1))
+WINDOW_NAME="new-${WINDOW_INDEX}"
+
+echo "  Creating tmux window: $WINDOW_NAME"
+
+# Create new tmux window
+tmux new-window -d -t "${TMUX_SESSION}:" -n "$WINDOW_NAME"
+sleep 0.3
+
+# Change to working directory
+tmux send-keys -t "${TMUX_SESSION}:${WINDOW_NAME}" "cd \"$WORKING_DIR\"" Enter
+sleep 0.1
+
+# Start Claude with environment variables for thread context
+tmux send-keys -t "${TMUX_SESSION}:${WINDOW_NAME}" "CLAUDE_THREAD_TS=$THREAD_TS CLAUDE_SLACK_CHANNEL=$CHANNEL claude" Enter
+
+# If message provided, wait for Claude to be ready and send it
+if [[ -n "$MESSAGE" ]]; then
+  echo "  Waiting for Claude to be ready..."
+  READY=false
+  for i in {1..50}; do  # 15 seconds max (50 * 0.3)
+    CONTENT=$(tmux capture-pane -t "${TMUX_SESSION}:${WINDOW_NAME}" -p 2>/dev/null)
+    # Check for ready indicators
+    if echo "$CONTENT" | grep -qE '(Welcome|❯|What would you like)'; then
+      READY=true
+      break
+    fi
+    sleep 0.3
+  done
+
+  if [[ "$READY" == "true" ]]; then
+    sleep 0.2  # Extra settle time
+    echo "  Sending message to Claude..."
+    # Escape the message for tmux send-keys
+    tmux send-keys -t "${TMUX_SESSION}:${WINDOW_NAME}" -l "$MESSAGE"
+    tmux send-keys -t "${TMUX_SESSION}:${WINDOW_NAME}" Enter
+  else
+    echo "  Warning: Claude didn't become ready in time, message not sent" >&2
+  fi
+fi
+
+# Register session in sessions.json
+echo "  Registering session..."
+CREATED_AT=$(date -Iseconds)
+flock "$SESSIONS_LOCK" -c "
+  if [[ ! -f '$SESSIONS_FILE' ]]; then
+    echo '{}' > '$SESSIONS_FILE'
+  fi
+  TMP_FILE=\$(mktemp)
+  jq --arg ts '$THREAD_TS' \
+     --arg ch '$CHANNEL' \
+     --arg win '$WINDOW_NAME' \
+     --arg dir '$WORKING_DIR' \
+     --arg created '$CREATED_AT' \
+     '.[\$ts] = {channel: \$ch, window: \$win, workingDir: \$dir, status: \"active\", created_at: \$created}' \
+     '$SESSIONS_FILE' > \"\$TMP_FILE\" && mv \"\$TMP_FILE\" '$SESSIONS_FILE'
+"
+
+echo "  Window: $WINDOW_NAME"
 echo ""
 
 # Check if we're already in the tmux session
@@ -100,14 +149,14 @@ if [[ -n "$TMUX" ]]; then
   # Already in tmux - just switch to the window
   CURRENT_SESSION=$(tmux display-message -p '#{session_name}')
   if [[ "$CURRENT_SESSION" == "$TMUX_SESSION" ]]; then
-    echo "Switching to window $WINDOW..."
-    tmux select-window -t "$TMUX_SESSION:$WINDOW"
+    echo "Switching to window $WINDOW_NAME..."
+    tmux select-window -t "$TMUX_SESSION:$WINDOW_NAME"
   else
-    echo "Switching to session $TMUX_SESSION:$WINDOW..."
-    tmux switch-client -t "$TMUX_SESSION:$WINDOW"
+    echo "Switching to session $TMUX_SESSION:$WINDOW_NAME..."
+    tmux switch-client -t "$TMUX_SESSION:$WINDOW_NAME"
   fi
 else
   # Not in tmux - attach to the session and window
   echo "Attaching to tmux session..."
-  tmux attach -t "$TMUX_SESSION:$WINDOW"
+  tmux attach -t "$TMUX_SESSION:$WINDOW_NAME"
 fi
