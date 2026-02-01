@@ -45,12 +45,12 @@ if [[ ! -d "$WORKING_DIR" ]]; then
 fi
 WORKING_DIR=$(cd "$WORKING_DIR" && pwd)
 
-# Build message with directory prefix
+# Build message with directory prefix and marker for bridge to recognize
 DIR_DISPLAY="${WORKING_DIR/#$HOME/~}"
 if [[ -z "$MESSAGE" ]]; then
-  FULL_MESSAGE="[$WORKING_DIR] Starting session"
+  FULL_MESSAGE="[$WORKING_DIR] Starting session [slack-claude]"
 else
-  FULL_MESSAGE="[$WORKING_DIR] $MESSAGE"
+  FULL_MESSAGE="[$WORKING_DIR] $MESSAGE [slack-claude]"
 fi
 
 echo "Starting Claude session..."

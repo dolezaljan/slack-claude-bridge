@@ -702,6 +702,8 @@ async function handleMessage(message, channel, say) {
 
   // Parse working directory from message (only for new threads)
   let messageText = message.text || '';
+  // Strip [slack-claude] marker if present (from user-initiated sessions)
+  messageText = messageText.replace(/\s*\[slack-claude\]\s*/g, '').trim();
   let workingDir = null;
   let dirWarning = null;
 
@@ -1043,7 +1045,9 @@ app.message(async ({ message, say }) => {
 
   // Ignore bot messages and most message subtypes (edits, deletes, etc.)
   // But allow file_share subtype for file attachments
-  if (message.bot_id) return;
+  // Exception: allow bot messages with [slack-claude] marker (user-initiated from host)
+  const isUserInitiated = message.text?.includes('[slack-claude]');
+  if (message.bot_id && !isUserInitiated) return;
   if (message.subtype && message.subtype !== 'file_share') return;
   if (!message.user) return;
 
