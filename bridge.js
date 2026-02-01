@@ -276,7 +276,28 @@ async function waitForClaudeReady(windowName, maxWaitMs = TIMING.CLAUDE_READY_TI
 
 // Send text to a tmux window
 async function sendToWindow(windowName, text) {
-  // Check if this is an option selection
+  // Check if this is an option with additional instructions (e.g., "1 but only this file" or "3 try something else")
+  const optionParsed = parseOptionWithInstructions(text);
+  if (optionParsed.hasInstructions) {
+    console.log(`[${new Date().toISOString()}] Option ${optionParsed.optionKey} with instructions: "${optionParsed.instructions.substring(0, 50)}..."`);
+    // Send the option key
+    execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} '${optionParsed.optionKey}'`);
+    // Wait for the option to be processed
+    await new Promise(resolve => setTimeout(resolve, 300));
+    // Press Tab to open amendment input
+    execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} Tab`);
+    // Wait for input to appear
+    await new Promise(resolve => setTimeout(resolve, 200));
+    // Type the instructions
+    const escapedInstructions = optionParsed.instructions.replace(/'/g, "'\\''");
+    execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} -l '${escapedInstructions}'`);
+    // Send Enter to submit
+    execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} Enter`);
+    console.log(`[${new Date().toISOString()}] Option with instructions sent to ${windowName}`);
+    return;
+  }
+
+  // Check if this is a simple option selection
   if (isOptionSelection(text)) {
     const key = getOptionKey(text);
     if (key) {
@@ -311,6 +332,32 @@ function isOptionSelection(text) {
 function isRejectionOption(text) {
   const normalized = text.trim().toLowerCase();
   return normalized === '3' || normalized === 'n' || normalized === 'no';
+}
+
+// Check if text is an option with additional instructions (e.g., "1 but only this file" or "3 try something else")
+// Returns { hasInstructions: boolean, optionKey: string, instructions: string }
+function parseOptionWithInstructions(text) {
+  const normalized = text.trim();
+
+  // Match "<digit> <instructions>" or "<digit>. <instructions>"
+  const digitMatch = normalized.match(/^([1-9])\.?\s+(.+)$/s);
+  if (digitMatch) {
+    return { hasInstructions: true, optionKey: digitMatch[1], instructions: digitMatch[2].trim() };
+  }
+
+  // Match "yes <instructions>" or "y <instructions>"
+  const yesMatch = normalized.match(/^(yes|y)\s+(.+)$/is);
+  if (yesMatch) {
+    return { hasInstructions: true, optionKey: '1', instructions: yesMatch[2].trim() };
+  }
+
+  // Match "no <instructions>" or "n <instructions>"
+  const noMatch = normalized.match(/^(no|n)\s+(.+)$/is);
+  if (noMatch) {
+    return { hasInstructions: true, optionKey: '3', instructions: noMatch[2].trim() };
+  }
+
+  return { hasInstructions: false, optionKey: null, instructions: null };
 }
 
 // Get the key to send for an option selection
@@ -844,11 +891,26 @@ async function handleMessage(message, channel, say) {
 
   // Send the text message
   if (messageText.trim()) {
-    console.log(`[${new Date().toISOString()}] Sending text: ${messageText.substring(0, 50)}...`);
+    let textToSend = messageText;
+
+    // If there's a pending permission and the message is not an option selection,
+    // treat it as rejection with instructions (implicit "3 <message>")
+    if (session.pendingPermission && !isOptionSelection(messageText) && !parseOptionWithInstructions(messageText).hasInstructions) {
+      console.log(`[${new Date().toISOString()}] Pending permission + arbitrary text -> treating as rejection with instructions`);
+      textToSend = `3 ${messageText}`;
+    }
+
+    // Clear pendingPermission flag since we're responding
+    if (session.pendingPermission) {
+      session.pendingPermission = false;
+      saveSessions(sessions);
+    }
+
+    console.log(`[${new Date().toISOString()}] Sending text: ${textToSend.substring(0, 50)}...`);
     // Write pending file so hook knows this message came from Slack (trim for consistent hash)
     const msgHash = createHash('md5').update(messageText.trim()).digest('hex');
     writeFileSync(`/tmp/claude-slack-pending-${threadTs}`, msgHash);
-    await sendToWindow(session.window, messageText);
+    await sendToWindow(session.window, textToSend);
 
     // For rejection options (3, n, no), remove eyes after a brief delay since Claude won't continue
     // For acceptance options (1, 2, y, yes), let hooks remove eyes when Claude finishes

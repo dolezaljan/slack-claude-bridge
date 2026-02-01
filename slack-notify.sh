@@ -226,7 +226,7 @@ case "$EVENT_TYPE" in
     case "$NOTIFICATION_TYPE" in
       "idle_prompt")
         IDLE_TIME=$(date -Iseconds)
-        update_session '.[$ts].status = "idle" | .[$ts].idle_since = $idle' "--arg idle \"$IDLE_TIME\""
+        update_session '.[$ts].status = "idle" | .[$ts].idle_since = $idle | del(.[$ts].pendingPermission)' "--arg idle \"$IDLE_TIME\""
         if [[ -n "$THREAD_TS" && -f "$SESSIONS_FILE" ]]; then
           LAST_MSG_TS=$(jq -r ".\"$THREAD_TS\".lastMessageTs // empty" "$SESSIONS_FILE")
           if [[ -n "$LAST_MSG_TS" ]]; then
@@ -242,6 +242,8 @@ case "$EVENT_TYPE" in
           LAST_MSG_TS=$(jq -r ".\"$THREAD_TS\".lastMessageTs // empty" "$SESSIONS_FILE")
           [[ -n "$LAST_MSG_TS" ]] && remove_eyes_reaction "$LAST_MSG_TS"
         fi
+        # Mark session as having pending permission (for bridge to detect)
+        update_session '.[$ts].pendingPermission = true'
         MESSAGE=":lock: Claude Code needs permission to proceed"
         INCLUDE_PROMPT=true
         ;;
@@ -255,8 +257,11 @@ case "$EVENT_TYPE" in
     if [[ "$CURRENT_WINDOW" == new-* && "$SESSION_ID" != "unknown" ]]; then
       tmux rename-window -t "$TMUX_SESSION:$CURRENT_WINDOW" "$SESSION_ID" 2>/dev/null
       CURRENT_WINDOW="$SESSION_ID"
-      update_session '.[$ts].window = $sid | .[$ts].sessionId = $sidfull | .[$ts].status = "active"' \
+      update_session '.[$ts].window = $sid | .[$ts].sessionId = $sidfull | .[$ts].status = "active" | del(.[$ts].pendingPermission)' \
         "--arg sid \"$SESSION_ID\" --arg sidfull \"$SESSION_ID_FULL\""
+    else
+      # Clear pendingPermission flag
+      update_session 'del(.[$ts].pendingPermission)'
     fi
 
     # Remove eyes reaction
