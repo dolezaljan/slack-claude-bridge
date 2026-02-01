@@ -1,6 +1,14 @@
 # Claude Code Slack Bridge
 
-Bidirectional bridge between Slack and Claude Code. Send messages to Claude via Slack DM or @mentions, receive responses in threads. Supports multiple concurrent sessions, file/image attachments, and automatic session management.
+> *For those who can't stop shipping, even from the throne.* 🚽👑
+>
+> Because sometimes inspiration strikes in the bathroom, and you're not about to grab your laptop. Now you can `fix that one bug` from your phone while... taking a break.
+
+---
+
+Bidirectional bridge between Slack and Claude Code. Send messages to Claude via Slack DM or @mentions, receive responses in threads. Control your AI coding assistant from anywhere - meetings, commutes, or *strategic thinking sessions*.
+
+Supports multiple concurrent sessions, file/image attachments, and automatic session management.
 
 ## Architecture
 
