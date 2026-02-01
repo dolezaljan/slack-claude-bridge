@@ -1,15 +1,170 @@
 #!/bin/bash
 # Start a Claude session that's linked to a Slack thread
-# Usage: slack-claude [working_dir] [initial_message]
+# Usage: slack-claude [options] [working_dir] [initial_message]
+#
+# Options:
+#   --continue           Resume the most recent session in the directory
+#   --resume [id]        Resume a session (interactive picker if no ID)
+#   --list               List available sessions with IDs
 #
 # Examples:
-#   slack-claude                          # Current dir, default message
-#   slack-claude ~/projects/myapp         # Specific dir
+#   slack-claude                          # Current dir, new session
+#   slack-claude ~/projects/myapp         # Specific dir, new session
 #   slack-claude . "Fix the login bug"    # Current dir with message
+#   slack-claude --continue ~/myapp       # Resume last session in ~/myapp
+#   slack-claude --resume .               # Interactive session picker
+#   slack-claude --resume abc123 .        # Resume by ID (or prefix)
+#   slack-claude --list ~/myapp           # List sessions for directory
 
 CONFIG_FILE="$HOME/.claude/slack-bridge/config.json"
 SESSIONS_FILE="/tmp/claude-slack-sessions.json"
 SESSIONS_LOCK="/tmp/claude-slack-sessions.lock"
+
+# Get Claude sessions index path for a directory
+get_sessions_index() {
+  local dir="$1"
+  local encoded="${dir//\//-}"  # Replace / with -
+  encoded="${encoded//./-}"     # Replace . with -
+  echo "$HOME/.claude/projects/$encoded/sessions-index.json"
+}
+
+# Format relative time
+relative_time() {
+  local seconds="$1"
+  if [[ $seconds -lt 60 ]]; then
+    echo "${seconds}s ago"
+  elif [[ $seconds -lt 3600 ]]; then
+    echo "$((seconds / 60))m ago"
+  elif [[ $seconds -lt 86400 ]]; then
+    echo "$((seconds / 3600))h ago"
+  else
+    echo "$((seconds / 86400))d ago"
+  fi
+}
+
+# List sessions for a directory
+list_sessions() {
+  local dir="$1"
+  local index_file
+  index_file=$(get_sessions_index "$dir")
+
+  if [[ ! -f "$index_file" ]]; then
+    echo "No sessions found for $dir" >&2
+    return 1
+  fi
+
+  local now
+  now=$(date +%s)
+
+  echo "Sessions for ${dir/#$HOME/~}:"
+  echo ""
+  printf "%-10s  %-45s  %6s  %10s\n" "ID" "Summary" "Msgs" "Modified"
+  printf "%-10s  %-45s  %6s  %10s\n" "----------" "---------------------------------------------" "------" "----------"
+
+  jq -r --argjson now "$now" '.entries | sort_by(.modified) | reverse | .[] |
+    [
+      .sessionId[0:8],
+      (.summary // .firstPrompt // "No summary")[0:45],
+      .messageCount,
+      (($now - (.modified | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) | tostring)
+    ] | @tsv' "$index_file" 2>/dev/null | while IFS=$'\t' read -r id summary msgs modified_secs; do
+      printf "%-10s  %-45s  %6s  %10s\n" "$id" "$summary" "$msgs" "$(relative_time "$modified_secs")"
+    done
+}
+
+# Interactive session picker (uses fzf if available, falls back to select)
+pick_session() {
+  local dir="$1"
+  local index_file
+  index_file=$(get_sessions_index "$dir")
+
+  if [[ ! -f "$index_file" ]]; then
+    echo "No sessions found for $dir" >&2
+    return 1
+  fi
+
+  local now
+  now=$(date +%s)
+
+  # Build session list
+  local sessions=()
+  local displays=()
+  while IFS=$'\t' read -r full_id short_id summary msgs modified_secs; do
+    sessions+=("$full_id")
+    displays+=("$(printf "%-8s  %-45s  %3s msgs  %s" "$short_id" "$summary" "$msgs" "$(relative_time "$modified_secs")")")
+  done < <(jq -r --argjson now "$now" '.entries | sort_by(.modified) | reverse | .[] |
+    [
+      .sessionId,
+      .sessionId[0:8],
+      (.summary // .firstPrompt // "No summary")[0:45],
+      .messageCount,
+      (($now - (.modified | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) | tostring)
+    ] | @tsv' "$index_file" 2>/dev/null)
+
+  if [[ ${#sessions[@]} -eq 0 ]]; then
+    echo "No sessions found" >&2
+    return 1
+  fi
+
+  local selection
+  if command -v fzf &>/dev/null; then
+    # Use fzf for nice interactive picker
+    local idx
+    idx=$(for i in "${!displays[@]}"; do
+      printf "%s\t%s\n" "${sessions[$i]}" "${displays[$i]}"
+    done | fzf --with-nth=2.. --delimiter='\t' --height=40% --reverse \
+               --header="Select session (type to filter):" \
+               --preview-window=hidden | cut -f1)
+    selection="$idx"
+  else
+    # Fall back to simple numbered list
+    echo "Select session to resume:" >&2
+    PS3="Enter number: "
+    select opt in "${displays[@]}"; do
+      if [[ -n "$opt" ]]; then
+        selection="${sessions[$((REPLY-1))]}"
+        break
+      fi
+    done
+  fi
+
+  if [[ -z "$selection" ]]; then
+    return 1
+  fi
+
+  echo "$selection"
+}
+
+# Find session by ID prefix
+find_session_by_prefix() {
+  local dir="$1"
+  local prefix="$2"
+  local index_file
+  index_file=$(get_sessions_index "$dir")
+
+  if [[ ! -f "$index_file" ]]; then
+    return 1
+  fi
+
+  local matches
+  matches=$(jq -r --arg prefix "$prefix" '.entries[] | select(.sessionId | startswith($prefix)) | .sessionId' "$index_file" 2>/dev/null)
+
+  local count
+  count=$(echo "$matches" | grep -c . || echo 0)
+
+  if [[ $count -eq 0 ]]; then
+    echo "No session found matching prefix: $prefix" >&2
+    return 1
+  elif [[ $count -gt 1 ]]; then
+    echo "Multiple sessions match prefix '$prefix':" >&2
+    echo "$matches" | while read -r id; do
+      echo "  $id"
+    done >&2
+    return 1
+  fi
+
+  echo "$matches"
+}
 
 # Load config
 if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -27,17 +182,65 @@ if [[ -z "$BOT_TOKEN" || -z "$CHANNEL" ]]; then
 fi
 
 # Parse arguments
-# If single arg and it's not a directory, treat it as message
-if [[ $# -eq 1 && ! -d "$1" ]]; then
-  WORKING_DIR="."
-  MESSAGE="$1"
-elif [[ $# -ge 1 ]]; then
-  WORKING_DIR="$1"
-  MESSAGE="${2:-}"
-else
-  WORKING_DIR="."
-  MESSAGE=""
-fi
+RESUME_MODE=""
+RESUME_ID=""
+WORKING_DIR=""
+MESSAGE=""
+LIST_MODE=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --continue)
+      RESUME_MODE="continue"
+      shift
+      ;;
+    --resume)
+      RESUME_MODE="resume"
+      # Check if next arg is an ID (not a flag, not a directory)
+      if [[ -n "$2" && "$2" != --* && ! -d "$2" ]]; then
+        RESUME_ID="$2"
+        shift 2
+      else
+        # No ID - will use picker later
+        shift
+      fi
+      ;;
+    --list|-l)
+      LIST_MODE=true
+      shift
+      ;;
+    -*)
+      echo "Error: Unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      # Positional arguments: [working_dir] [message]
+      if [[ -z "$WORKING_DIR" ]]; then
+        # First positional - could be dir or message
+        if [[ -d "$1" ]]; then
+          WORKING_DIR="$1"
+        else
+          # Not a directory - treat as message if no more args
+          if [[ $# -eq 1 ]]; then
+            WORKING_DIR="."
+            MESSAGE="$1"
+          else
+            # Multiple args but first isn't a dir - error
+            echo "Error: Directory not found: $1" >&2
+            exit 1
+          fi
+        fi
+      else
+        # Second positional - must be message
+        MESSAGE="$1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+# Default working directory
+WORKING_DIR="${WORKING_DIR:-.}"
 
 # Resolve working directory to absolute path
 if [[ ! -d "$WORKING_DIR" ]]; then
@@ -46,15 +249,61 @@ if [[ ! -d "$WORKING_DIR" ]]; then
 fi
 WORKING_DIR=$(cd "$WORKING_DIR" && pwd)
 
-# Build message with directory prefix
-DIR_DISPLAY="${WORKING_DIR/#$HOME/~}"
-if [[ -z "$MESSAGE" ]]; then
-  FULL_MESSAGE="[$DIR_DISPLAY] Starting session"
-else
-  FULL_MESSAGE="[$DIR_DISPLAY] $MESSAGE"
+# Handle --list mode
+if [[ "$LIST_MODE" == true ]]; then
+  list_sessions "$WORKING_DIR"
+  exit 0
 fi
 
-echo "Starting Claude session..."
+# Handle --resume without ID (interactive picker)
+if [[ "$RESUME_MODE" == "resume" && -z "$RESUME_ID" ]]; then
+  RESUME_ID=$(pick_session "$WORKING_DIR")
+  if [[ -z "$RESUME_ID" ]]; then
+    echo "No session selected" >&2
+    exit 1
+  fi
+  echo "Selected session: ${RESUME_ID:0:8}..."
+fi
+
+# Handle --resume with ID prefix (resolve to full ID)
+if [[ "$RESUME_MODE" == "resume" && -n "$RESUME_ID" && ${#RESUME_ID} -lt 36 ]]; then
+  FULL_ID=$(find_session_by_prefix "$WORKING_DIR" "$RESUME_ID")
+  if [[ -z "$FULL_ID" ]]; then
+    exit 1
+  fi
+  RESUME_ID="$FULL_ID"
+fi
+
+# Build message with directory prefix
+DIR_DISPLAY="${WORKING_DIR/#$HOME/~}"
+if [[ -n "$RESUME_MODE" ]]; then
+  if [[ "$RESUME_MODE" == "continue" ]]; then
+    SESSION_DESC="Resuming last session"
+  else
+    SESSION_DESC="Resuming session ${RESUME_ID:0:8}"
+  fi
+  if [[ -z "$MESSAGE" ]]; then
+    FULL_MESSAGE="[$DIR_DISPLAY] $SESSION_DESC"
+  else
+    FULL_MESSAGE="[$DIR_DISPLAY] $SESSION_DESC: $MESSAGE"
+  fi
+else
+  if [[ -z "$MESSAGE" ]]; then
+    FULL_MESSAGE="[$DIR_DISPLAY] Starting session"
+  else
+    FULL_MESSAGE="[$DIR_DISPLAY] $MESSAGE"
+  fi
+fi
+
+if [[ -n "$RESUME_MODE" ]]; then
+  if [[ "$RESUME_MODE" == "continue" ]]; then
+    echo "Resuming Claude session (--continue)..."
+  else
+    echo "Resuming Claude session: ${RESUME_ID:0:8}..."
+  fi
+else
+  echo "Starting Claude session..."
+fi
 echo "  Directory: $DIR_DISPLAY"
 echo "  Posting to Slack..."
 
@@ -96,8 +345,16 @@ sleep 0.3
 tmux send-keys -t "${TMUX_SESSION}:${WINDOW_NAME}" "cd \"$WORKING_DIR\"" Enter
 sleep 0.1
 
+# Build Claude command with resume flags
+CLAUDE_CMD="CLAUDE_THREAD_TS=$THREAD_TS CLAUDE_SLACK_CHANNEL=$CHANNEL claude"
+if [[ "$RESUME_MODE" == "continue" ]]; then
+  CLAUDE_CMD="$CLAUDE_CMD --continue"
+elif [[ "$RESUME_MODE" == "resume" ]]; then
+  CLAUDE_CMD="$CLAUDE_CMD --resume $RESUME_ID"
+fi
+
 # Start Claude with environment variables for thread context
-tmux send-keys -t "${TMUX_SESSION}:${WINDOW_NAME}" "CLAUDE_THREAD_TS=$THREAD_TS CLAUDE_SLACK_CHANNEL=$CHANNEL claude" Enter
+tmux send-keys -t "${TMUX_SESSION}:${WINDOW_NAME}" "$CLAUDE_CMD" Enter
 
 # If message provided, wait for Claude to be ready and send it
 if [[ -n "$MESSAGE" ]]; then

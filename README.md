@@ -194,18 +194,39 @@ This will:
 
 **From local machine:**
 ```bash
-slack-claude [working_dir] [initial_message]
+slack-claude [options] [working_dir] [initial_message]
 ```
+
+Options:
+- `--continue` - Resume the most recent session in the directory
+- `--resume [id]` - Resume a session (interactive picker if no ID)
+- `--list` - List available sessions with IDs
 
 Examples:
 ```bash
-slack-claude                              # Current dir, no message
+slack-claude                              # Current dir, new session
 slack-claude ~/projects/myapp             # Specific directory
 slack-claude . "Fix the login bug"        # Current dir with message
 slack-claude "Fix the login bug"          # Current dir with message (shorthand)
+slack-claude --continue ~/myapp           # Resume last session in ~/myapp
+slack-claude --resume .                   # Interactive session picker (fzf)
+slack-claude --resume 878eff58 .          # Resume by ID prefix
+slack-claude --list ~/myapp               # List sessions with IDs
 ```
 
 This creates a Slack thread and opens the tmux window locally. You can then continue the conversation from either Slack (mobile) or the local terminal.
+
+**Session migration**: Using `--resume` with a session that wasn't previously connected to Slack will "migrate" it - a new thread is created and all new notifications will go there.
+
+**Listing sessions**: Use `--list` to see available sessions with their IDs:
+```
+Sessions for ~/.claude/slack-bridge:
+
+ID          Summary                                        Msgs    Modified
+----------  ---------------------------------------------  ------  ----------
+878eff58    Fix navigation and add PreCompact...              13       18m ago
+9ed7e016    User Greeting and Assistance Offer                 2        1d ago
+```
 
 Each thread runs its own Claude instance.
 
