@@ -150,11 +150,26 @@ This will:
 
 ### Starting a Session
 
+**From Slack:**
 - **DM the bot**: Send a direct message to start a new session
 - **@mention**: In any channel, `@Claude Code your message`
 - **Custom directory**: Prefix with `[/path/to/dir]` to set working directory
 
-Each message creates a thread, and each thread runs its own Claude instance.
+**From local machine:**
+```bash
+slack-claude [working_dir] [initial_message]
+```
+
+Examples:
+```bash
+slack-claude                              # Current dir
+slack-claude ~/projects/myapp             # Specific directory
+slack-claude . "Fix the login bug"        # With initial message
+```
+
+This creates a Slack thread and opens the tmux window locally. You can then continue the conversation from either Slack (mobile) or the local terminal.
+
+Each thread runs its own Claude instance.
 
 ### File Attachments
 
