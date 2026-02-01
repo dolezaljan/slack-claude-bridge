@@ -147,6 +147,7 @@ function loadSessions() {
 
 function saveSessions(sessions) {
   const json = JSON.stringify(sessions, null, 2);
+  console.log(`[${new Date().toISOString()}] Saving sessions, keys: ${Object.keys(sessions).join(', ')}`);
   // Use flock for atomic write with locking (coordinates with hooks)
   execSync(`flock ${SESSIONS_LOCK} -c 'cat > ${SESSIONS_FILE}'`, { input: json });
 }
@@ -304,6 +305,12 @@ function isOptionSelection(text) {
   const normalized = text.trim().toLowerCase();
   return /^[1-9]$/.test(normalized) ||
          ['yes', 'no', 'y', 'n'].includes(normalized);
+}
+
+// Check if text is a rejection option (3, n, no) - Claude won't continue after these
+function isRejectionOption(text) {
+  const normalized = text.trim().toLowerCase();
+  return normalized === '3' || normalized === 'n' || normalized === 'no';
 }
 
 // Get the key to send for an option selection
@@ -829,10 +836,10 @@ async function handleMessage(message, channel, say) {
     }
   }
 
-  // Add eyes reaction and store lastMessageTs BEFORE sending to Claude
-  // This prevents race condition where Claude responds before we save
+  // Add eyes reaction to show message was received
   await addReaction(channel, message.ts, 'eyes');
   sessions[threadTs].lastMessageTs = message.ts;
+  console.log(`[${new Date().toISOString()}] Stored lastMessageTs: ${message.ts} for thread ${threadTs}`);
   saveSessions(sessions);
 
   // Send the text message
@@ -842,6 +849,23 @@ async function handleMessage(message, channel, say) {
     const msgHash = createHash('md5').update(messageText.trim()).digest('hex');
     writeFileSync(`/tmp/claude-slack-pending-${threadTs}`, msgHash);
     await sendToWindow(session.window, messageText);
+
+    // For rejection options (3, n, no), remove eyes after a brief delay since Claude won't continue
+    // For acceptance options (1, 2, y, yes), let hooks remove eyes when Claude finishes
+    if (isRejectionOption(messageText)) {
+      setTimeout(async () => {
+        try {
+          await app.client.reactions.remove({
+            channel: channel,
+            name: 'eyes',
+            timestamp: message.ts
+          });
+          console.log(`[${new Date().toISOString()}] Removed eyes from rejection option`);
+        } catch (e) {
+          // Ignore - reaction might already be removed by hook
+        }
+      }, 1500);  // 1.5s delay so user sees eyes briefly
+    }
   }
 }
 
