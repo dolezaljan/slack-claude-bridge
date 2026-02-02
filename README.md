@@ -12,6 +12,18 @@ Bidirectional bridge between Slack and Claude Code CLI. Send messages to Claude 
 
 Supports multiple concurrent sessions, file/image attachments, and automatic session management.
 
+## Why Use This?
+
+- **📱 Mobile-first Claude CLI** - Run coding sessions from your phone via Slack DMs
+- **🔄 Seamless handoff** - Start on mobile, continue in terminal (or vice versa) - same session, no context loss
+- **📎 Drag-and-drop files** - Send screenshots, PDFs, code files from phone directly to your running session
+- **🧵 Multi-project parallelism** - Each Slack thread = isolated Claude session with its own working directory
+- **🔁 Session persistence** - Sessions survive disconnects; resume old threads anytime
+- **🛑 Reaction controls** - Kill sessions or approve/reject permission prompts with emoji reactions
+- **🌐 No VPN/SSH needed** - Slack is the transport layer; works anywhere with internet
+
+Perfect for: fixing bugs during meetings, reviewing PRs on the couch, or keeping tabs on long-running tasks.
+
 ## Architecture
 
 ```
