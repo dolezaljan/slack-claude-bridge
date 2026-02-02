@@ -125,7 +125,11 @@ remove_eyes_reaction() {
 }
 
 # Capture permission prompt from bottom of terminal
+# Returns: prompt text, or empty if not found
+# Sets IS_TOOL_PERMISSION=true if this is a tool permission (has ● ToolName(...) context)
 capture_permission_prompt() {
+  IS_TOOL_PERMISSION=false
+
   if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     return
   fi
@@ -133,6 +137,11 @@ capture_permission_prompt() {
   local target_window="${SESSION_ID:-$CURRENT_WINDOW}"
   local content
   content=$(tmux capture-pane -t "$TMUX_SESSION:$target_window" -p -S -50 2>/dev/null)
+
+  # Check if this has a tool context (● ToolName(...)) - indicates real permission prompt
+  if echo "$content" | grep -q '● [A-Za-z]\+(' 2>/dev/null; then
+    IS_TOOL_PERMISSION=true
+  fi
 
   echo "$content" | awk '
     /● [A-Za-z]+\(/ {
@@ -233,7 +242,7 @@ case "$EVENT_TYPE" in
     case "$NOTIFICATION_TYPE" in
       "idle_prompt")
         IDLE_TIME=$(date -Iseconds)
-        update_session '.[$ts].status = "idle" | .[$ts].idle_since = $idle | del(.[$ts].pendingPermission)' "--arg idle \"$IDLE_TIME\""
+        update_session '.[$ts].status = "idle" | .[$ts].idle_since = $idle | del(.[$ts].pendingPermission) | del(.[$ts].pendingQuestion) | del(.[$ts].watchForNextQuestion)' "--arg idle \"$IDLE_TIME\""
         if [[ -n "$THREAD_TS" && -f "$SESSIONS_FILE" ]]; then
           LAST_MSG_TS=$(jq -r ".\"$THREAD_TS\".lastMessageTs // empty" "$SESSIONS_FILE")
           if [[ -n "$LAST_MSG_TS" ]]; then
@@ -249,9 +258,19 @@ case "$EVENT_TYPE" in
           LAST_MSG_TS=$(jq -r ".\"$THREAD_TS\".lastMessageTs // empty" "$SESSIONS_FILE")
           [[ -n "$LAST_MSG_TS" ]] && remove_eyes_reaction "$LAST_MSG_TS"
         fi
-        # Mark session as having pending permission (for bridge to detect)
-        update_session '.[$ts].pendingPermission = true'
-        MESSAGE=":lock: Claude Code needs permission to proceed"
+
+        # Capture prompt to determine if it's a tool permission or a question
+        PROMPT=$(capture_permission_prompt)
+
+        if [[ "$IS_TOOL_PERMISSION" == "true" ]]; then
+          # Real permission prompt (has ● ToolName(...) context)
+          update_session '.[$ts].pendingPermission = true'
+          MESSAGE=":lock: Claude Code needs permission to proceed"
+        else
+          # Question from Claude (AskUserQuestion) - not a tool permission
+          update_session '.[$ts].pendingQuestion = true | del(.[$ts].pendingPermission)'
+          MESSAGE=":question: Claude is asking a question"
+        fi
         INCLUDE_PROMPT=true
         ;;
       *)
@@ -267,11 +286,11 @@ case "$EVENT_TYPE" in
     if [[ "$CURRENT_WINDOW" == new-* && "$SESSION_ID" != "unknown" ]]; then
       tmux rename-window -t "$TMUX_SESSION:$CURRENT_WINDOW" "$SESSION_ID" 2>/dev/null
       CURRENT_WINDOW="$SESSION_ID"
-      update_session '.[$ts].window = $sid | .[$ts].sessionId = $sidfull | .[$ts].status = "active" | del(.[$ts].pendingPermission)' \
+      update_session '.[$ts].window = $sid | .[$ts].sessionId = $sidfull | .[$ts].status = "active" | del(.[$ts].pendingPermission) | del(.[$ts].pendingQuestion) | del(.[$ts].watchForNextQuestion)' \
         "--arg sid \"$SESSION_ID\" --arg sidfull \"$SESSION_ID_FULL\""
     else
-      # Clear pendingPermission flag
-      update_session 'del(.[$ts].pendingPermission)'
+      # Clear pending flags
+      update_session 'del(.[$ts].pendingPermission) | del(.[$ts].pendingQuestion) | del(.[$ts].watchForNextQuestion)'
     fi
 
     # Remove eyes reaction
@@ -306,7 +325,11 @@ if [[ "$INCLUDE_RESPONSE" == "true" ]]; then
 fi
 
 if [[ "$INCLUDE_PROMPT" == "true" ]]; then
-  PROMPT=$(capture_permission_prompt)
+  # PROMPT was already captured in the permission_prompt case
+  # Only capture if not already set
+  if [[ -z "$PROMPT" ]]; then
+    PROMPT=$(capture_permission_prompt)
+  fi
   if [[ -n "$PROMPT" ]]; then
     ESCAPED_PROMPT=$(json_escape "$PROMPT")
     FULL_MESSAGE="$FULL_MESSAGE\n\n\`\`\`\n$ESCAPED_PROMPT\n\`\`\`"

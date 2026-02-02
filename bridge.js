@@ -22,6 +22,8 @@ const TIMING = {
   IDLE_CHECK_INTERVAL: 60000,       // How often to check for idle sessions
   HEALTH_CHECK_INTERVAL: 30000,     // How often to check for crashed sessions
   TEMP_CLEANUP_INTERVAL: 86400000,  // How often to clean temp files (24h)
+  QUESTION_POLL_INTERVAL: 1500,     // How often to poll for question changes
+  QUESTION_POLL_STABLE: 500,        // Wait for terminal to stabilize before capturing
 };
 const SESSIONS_FILE = '/tmp/claude-slack-sessions.json';
 const SESSIONS_LOCK = '/tmp/claude-slack-sessions.lock';
@@ -308,6 +310,20 @@ async function sendToWindow(windowName, text) {
     return;
   }
 
+  // Check if this is a multi-select input (e.g., "1,2,3" or "1 2 3")
+  const multiSelect = parseMultiSelect(text);
+  if (multiSelect) {
+    await sendMultiSelect(windowName, multiSelect);
+    return;
+  }
+
+  // Check if this is a "next" command to proceed in multi-step questions
+  if (isNextCommand(text)) {
+    console.log(`[${new Date().toISOString()}] Sending Enter to proceed (next command)`);
+    execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} Enter`);
+    return;
+  }
+
   // Check if this is a simple option selection
   if (isOptionSelection(text)) {
     const key = getOptionKey(text);
@@ -384,6 +400,50 @@ function getOptionKey(text) {
     return '3'; // Option 3 is typically No (or last option)
   }
   return null;
+}
+
+// Check if text is a multi-select input (e.g., "1,2,3" or "1 2 3" or "1, 2, 3")
+// Returns array of digit strings if multi-select, null otherwise
+function parseMultiSelect(text) {
+  const normalized = text.trim();
+
+  // Match comma or space separated digits: "1,2,3" or "1 2 3" or "1, 2, 3"
+  const multiMatch = normalized.match(/^(\d+)(?:[,\s]+(\d+))+$/);
+  if (multiMatch) {
+    // Extract all numbers from the string
+    const numbers = normalized.match(/\d+/g);
+    if (numbers && numbers.length > 1) {
+      // Filter to valid option numbers (1-9) and return as strings
+      return numbers.filter(n => {
+        const num = parseInt(n, 10);
+        return num >= 1 && num <= 9;
+      });
+    }
+  }
+
+  return null;
+}
+
+// Check if text is a "next" or "proceed" command
+function isNextCommand(text) {
+  const normalized = text.trim().toLowerCase();
+  return ['next', 'proceed', 'continue', 'done', 'ok'].includes(normalized);
+}
+
+// Send multi-select: toggle each option then press Enter to proceed
+async function sendMultiSelect(windowName, digits) {
+  console.log(`[${new Date().toISOString()}] Multi-select: toggling options ${digits.join(', ')}`);
+
+  for (const digit of digits) {
+    execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} '${digit}'`);
+    // Small delay between toggles for UI to update
+    await new Promise(resolve => setTimeout(resolve, 150));
+  }
+
+  // Press Enter to proceed (select "Next")
+  await new Promise(resolve => setTimeout(resolve, 200));
+  execSync(`tmux send-keys -t ${TMUX_SESSION}:${windowName} Enter`);
+  console.log(`[${new Date().toISOString()}] Multi-select completed, pressed Enter to proceed`);
 }
 
 // ============================================
@@ -731,6 +791,188 @@ function cleanupOldTempFiles() {
 }
 
 // ============================================
+// Question Polling (for multi-step AskUserQuestion)
+// ============================================
+
+// Track last question hash per thread to detect changes
+const lastQuestionHash = new Map();
+
+// How long to poll for new questions after user responds (ms)
+const QUESTION_WATCH_WINDOW = 10000;
+
+// Capture question prompt from terminal (mirrors slack-notify.sh logic)
+function captureQuestionFromTerminal(windowName) {
+  try {
+    const content = capturePaneContent(windowName);
+    if (!content) return null;
+
+    // Check if there's a question prompt (ends with ?)
+    // Also check for numbered options pattern
+    const lines = content.split('\n');
+    let questionLine = null;
+    let options = [];
+    let capturing = false;
+
+    for (const line of lines) {
+      // Look for question line (contains ? but not http)
+      if (line.includes('?') && !line.includes('http') && !capturing) {
+        questionLine = line.trim();
+        capturing = true;
+        continue;
+      }
+
+      // Capture option lines (numbered or with selection indicator)
+      if (capturing) {
+        if (/[❯►].*\d+\./.test(line) || /^\s+\d+\./.test(line) || line.includes('Esc to cancel')) {
+          options.push(line.trim());
+        }
+      }
+    }
+
+    if (questionLine && options.length > 0) {
+      return {
+        question: questionLine,
+        options: options,
+        full: questionLine + '\n' + options.join('\n')
+      };
+    }
+
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Check if terminal shows a tool permission (● ToolName(...))
+function isToolPermissionPrompt(windowName) {
+  try {
+    const content = capturePaneContent(windowName);
+    return content && /● [A-Za-z]+\(/.test(content);
+  } catch {
+    return false;
+  }
+}
+
+// Post question update to Slack and mark as pending
+async function postQuestionToSlack(channel, threadTs, questionData, session) {
+  const cwd = session.workingDir?.split('/').pop() || 'unknown';
+  const sessionId = session.window;
+
+  const message = `:question: Claude is asking a question\n` +
+    `:file_folder: Project: \`${cwd}\` | Session: \`${sessionId}\`\n\n` +
+    '```\n' + questionData.full + '\n```';
+
+  try {
+    // Remove eyes from the last user message (their response was processed)
+    if (session.lastMessageTs) {
+      try {
+        await app.client.reactions.remove({
+          channel: channel,
+          name: 'eyes',
+          timestamp: session.lastMessageTs
+        });
+        console.log(`[${new Date().toISOString()}] Removed eyes from previous message`);
+      } catch (e) {
+        // Ignore - reaction might already be removed
+      }
+    }
+
+    await app.client.chat.postMessage({
+      channel: channel,
+      thread_ts: threadTs,
+      text: message,
+      unfurl_links: false
+    });
+    console.log(`[${new Date().toISOString()}] Posted question update to thread ${threadTs}`);
+
+    // Mark session as having pending question (waiting for user input)
+    const sessions = loadSessions();
+    if (sessions[threadTs]) {
+      sessions[threadTs].pendingQuestion = true;
+      delete sessions[threadTs].watchForNextQuestion;  // Stop watching
+      delete sessions[threadTs].lastMessageTs;  // Clear since we removed eyes
+      saveSessions(sessions);
+    }
+  } catch (e) {
+    console.error(`[${new Date().toISOString()}] Failed to post question: ${e.message}`);
+  }
+}
+
+function startQuestionPollingInterval() {
+  setInterval(async () => {
+    const sessions = loadSessions();
+    const now = Date.now();
+
+    for (const [threadTs, session] of Object.entries(sessions)) {
+      // Skip terminated sessions
+      if (session.status === 'terminated') {
+        if (lastQuestionHash.has(threadTs)) {
+          lastQuestionHash.delete(threadTs);
+        }
+        continue;
+      }
+
+      // Don't poll while waiting for user input (pendingQuestion = true)
+      if (session.pendingQuestion) {
+        continue;
+      }
+
+      // Only poll if we're watching for a new question (user recently responded)
+      if (!session.watchForNextQuestion) {
+        // Clean up hash tracking
+        if (lastQuestionHash.has(threadTs)) {
+          lastQuestionHash.delete(threadTs);
+        }
+        continue;
+      }
+
+      // Check if watch window has expired
+      const watchStartTime = new Date(session.watchForNextQuestion).getTime();
+      if (now - watchStartTime > QUESTION_WATCH_WINDOW) {
+        // Stop watching - no new question appeared
+        console.log(`[${new Date().toISOString()}] Watch window expired for ${session.window}`);
+        const updatedSessions = loadSessions();
+        if (updatedSessions[threadTs]) {
+          delete updatedSessions[threadTs].watchForNextQuestion;
+          saveSessions(updatedSessions);
+        }
+        lastQuestionHash.delete(threadTs);
+        continue;
+      }
+
+      // Skip if this is actually a tool permission
+      if (isToolPermissionPrompt(session.window)) {
+        continue;
+      }
+
+      // Wait for terminal to stabilize
+      await new Promise(resolve => setTimeout(resolve, TIMING.QUESTION_POLL_STABLE));
+
+      // Capture current question
+      const questionData = captureQuestionFromTerminal(session.window);
+
+      if (!questionData) {
+        // No question visible yet - keep watching
+        continue;
+      }
+
+      // Check if this is a new/different question
+      const questionHash = createHash('md5').update(questionData.full).digest('hex');
+      const lastHash = lastQuestionHash.get(threadTs);
+
+      if (!lastHash || questionHash !== lastHash) {
+        // New question detected! Post to Slack
+        console.log(`[${new Date().toISOString()}] New question detected in session ${session.window}`);
+        await postQuestionToSlack(session.channel, threadTs, questionData, session);
+      }
+
+      // Update hash
+      lastQuestionHash.set(threadTs, questionHash);
+    }
+  }, TIMING.QUESTION_POLL_INTERVAL);
+}
+
+// ============================================
 // Startup Reconnection
 // ============================================
 
@@ -910,16 +1152,29 @@ async function handleMessage(message, channel, say) {
   if (messageText.trim()) {
     let textToSend = messageText;
 
-    // If there's a pending permission and the message is not an option selection,
+    // Remember if this was a question response (before clearing flags)
+    const wasQuestion = session.pendingQuestion;
+
+    // If there's a pending permission (NOT a question) and the message is not an option selection,
     // treat it as rejection with instructions (implicit "3 <message>")
-    if (session.pendingPermission && !isOptionSelection(messageText) && !parseOptionWithInstructions(messageText).hasInstructions) {
+    // Questions (AskUserQuestion) should accept arbitrary text as option 4 "Type something"
+    if (session.pendingPermission && !wasQuestion && !isOptionSelection(messageText) && !parseOptionWithInstructions(messageText).hasInstructions) {
       console.log(`[${new Date().toISOString()}] Pending permission + arbitrary text -> treating as rejection with instructions`);
       textToSend = `3 ${messageText}`;
     }
 
-    // Clear pendingPermission flag since we're responding
-    if (session.pendingPermission) {
+    // Clear pending flags since we're responding
+    if (session.pendingPermission || session.pendingQuestion) {
       session.pendingPermission = false;
+      session.pendingQuestion = false;
+
+      // If responding to a question, start watching for the next question
+      // (multi-step AskUserQuestion wizard)
+      if (wasQuestion) {
+        session.watchForNextQuestion = new Date().toISOString();
+        console.log(`[${new Date().toISOString()}] Started watching for next question in ${session.window}`);
+      }
+
       saveSessions(sessions);
     }
 
@@ -928,6 +1183,34 @@ async function handleMessage(message, channel, say) {
     const msgHash = createHash('md5').update(messageText.trim()).digest('hex');
     writeFileSync(`/tmp/claude-slack-pending-${threadTs}`, msgHash);
     await sendToWindow(session.window, textToSend);
+
+    // For question responses that don't trigger a Stop event immediately, acknowledge with ✓
+    // This includes: single-option toggles, multi-select, and "next" commands
+    const isQuestionInput = wasQuestion && (
+      (isOptionSelection(messageText) && !isRejectionOption(messageText)) ||
+      parseMultiSelect(messageText) ||
+      isNextCommand(messageText)
+    );
+
+    if (isQuestionInput) {
+      setTimeout(async () => {
+        try {
+          await app.client.reactions.remove({
+            channel: channel,
+            name: 'eyes',
+            timestamp: message.ts
+          });
+          await app.client.reactions.add({
+            channel: channel,
+            name: 'white_check_mark',
+            timestamp: message.ts
+          });
+          console.log(`[${new Date().toISOString()}] Acknowledged question input with ✓`);
+        } catch (e) {
+          // Ignore reaction errors
+        }
+      }, 800);  // Brief delay to show eyes first
+    }
 
     // For rejection options (3, n, no), remove eyes after a brief delay since Claude won't continue
     // For acceptance options (1, 2, y, yes), let hooks remove eyes when Claude finishes
@@ -1428,6 +1711,9 @@ app.command('/claude-help', async ({ command, ack, respond }) => {
 
   // Start temp file cleanup (removes files older than 2 weeks)
   startTempFileCleanupInterval();
+
+  // Start question polling (for multi-step AskUserQuestion)
+  startQuestionPollingInterval();
 
   // Start the Slack app
   await app.start();
