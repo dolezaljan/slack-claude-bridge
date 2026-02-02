@@ -53,7 +53,12 @@ From `~/.claude/settings.json`:
 
 | File | Purpose |
 |------|---------|
-| `/tmp/claude-slack-thread-context.json` | Current thread context for hooks |
-| `/tmp/claude-slack-sessions.json` | Session tracking (multi-session) |
+| `/tmp/claude-slack-sessions.json` | Session tracking (thread → window mapping) |
 | `/tmp/claude-slack-sessions.lock` | File lock for sessions.json |
 | `/tmp/slack-bridge.log` | Bridge log file |
+| `/tmp/claude-slack-files/<threadTs>/` | Downloaded file attachments |
+| `/tmp/claude-slack-pending-<threadTs>` | Pending message hash (deduplication) |
+| `/tmp/claude-slack-last-sent-hash-<session>` | Last sent message hash (deduplication) |
+| `/tmp/claude-slack-last-sent-time-<session>` | Last sent message time |
+| `/tmp/claude-slack-dm-cache-<channel>` | DM channel cache |
+| `/tmp/claude-slack-bridge-<hash>.lock` | Instance lock (prevents duplicate bridges) |

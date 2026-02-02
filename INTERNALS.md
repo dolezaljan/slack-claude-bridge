@@ -610,11 +610,14 @@ const USER_DATA_DIR = `/tmp/claude-browser-${THREAD_TS.replace('.', '-')}`;
 
 #### Per-Session Context
 
-The global `/tmp/claude-slack-thread-context.json` is **no longer needed** for multi-session:
-- Hooks identify sessions via `session_id` lookup in `sessions.json`
-- Browser tool uses `CLAUDE_THREAD_TS` environment variable for profile isolation
+The global `/tmp/claude-slack-thread-context.json` is **no longer used** in multi-session mode.
 
-No per-thread context files are required.
+Thread context is now determined by:
+1. `CLAUDE_THREAD_TS` and `CLAUDE_SLACK_CHANNEL` environment variables (set when session starts)
+2. Lookup in `sessions.json` using current tmux window name
+3. Hooks use `session_id` from hook input to lookup in `sessions.json`
+
+Tools like `slack-read-thread.sh` and `slack-upload.sh` use the same detection methods.
 
 ## User Commands
 

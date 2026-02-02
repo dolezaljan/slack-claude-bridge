@@ -30,12 +30,14 @@ slack-claude-start --restart
 
 After modifying hook scripts (`slack-notify.sh`, etc.), changes take effect immediately (no restart needed).
 
-## Context Files
+## Runtime Files
 
 | File | Purpose |
 |------|---------|
-| `/tmp/claude-slack-thread-context.json` | Current Slack thread context (channel, thread_ts) |
-| `/tmp/claude-slack-last-sent-hash` | MD5 hash of last sent message (deduplication) |
+| `/tmp/claude-slack-sessions.json` | Session tracking (thread → window mapping) |
+| `/tmp/claude-slack-files/<threadTs>/` | Downloaded file attachments |
+
+Thread context is detected via `CLAUDE_THREAD_TS` env var or tmux window lookup in sessions.json.
 
 ## Adding New Tools
 
