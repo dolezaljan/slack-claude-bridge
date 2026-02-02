@@ -15,15 +15,31 @@ SSH_AUTH_SOCK=/run/user/1000/gcr/ssh git push
 - `bridge.js` - Main Slack bot using Socket Mode
 - `slack-notify.sh` - Hook script called by Claude Code on events
 - `slack-forward-prompt.sh` - Forwards local prompts to Slack
-- `slack-claude.sh` - Start sessions from local machine
+- `slack-read-thread.sh` - Read current Slack thread history
+- `slack-claude.sh` - Start sessions from local machine (symlinked to ~/.local/bin/)
 - `slack-upload.sh` - Upload files to Slack threads
+- `slack-claude-start.sh` - Start the bridge (symlinked to ~/.local/bin/)
+- `slack-bridge.md` - Global rules (symlinked to ~/.claude/rules/)
 
 ## Testing Changes
 
 After modifying `bridge.js`, restart the bridge:
 ```bash
-tmux send-keys -t claude:bridge C-c
-tmux send-keys -t claude:bridge 'npm start' Enter
+slack-claude-start --restart
 ```
 
 After modifying hook scripts (`slack-notify.sh`, etc.), changes take effect immediately (no restart needed).
+
+## Context Files
+
+| File | Purpose |
+|------|---------|
+| `/tmp/claude-slack-thread-context.json` | Current Slack thread context (channel, thread_ts) |
+| `/tmp/claude-slack-last-sent-hash` | MD5 hash of last sent message (deduplication) |
+
+## Adding New Tools
+
+1. Create executable scripts in this directory (`slack-bridge/`)
+2. Symlink from `~/.claude/` to here: `ln -s ~/.claude/slack-bridge/script.sh ~/.claude/script.sh`
+3. Document in this CLAUDE.md or relevant SPEC file
+4. Ensure proper error handling and usage messages
