@@ -1,37 +1,32 @@
-# External Dependencies
+# Installation & Dependencies
 
-Files outside `~/.claude/slack-bridge/` that are part of the Slack integration.
+All scripts live in this directory (`~/.claude/slack-bridge/`) and are symlinked for global access.
 
-## Hook Scripts
+## Symlinks Created by install.sh
 
-These scripts are called by Claude Code hooks (configured in `~/.claude/settings.json`):
-
-| File | Purpose |
-|------|---------|
-| `~/.claude/slack-notify.sh` | Sends Claude responses/notifications to Slack |
-| `~/.claude/slack-read-thread.sh` | Reads Slack thread history (for context) |
-| `~/.claude/slack-share-file.sh` | Shares files/screenshots to Slack |
-
-## Startup
-
-| File | Purpose |
-|------|---------|
-| `~/.claude/claude-slack-start.sh` | Bootstrap script to start tmux + bridge + Claude |
+| Source (slack-bridge/) | Symlink |
+|------------------------|---------|
+| `slack-notify.sh` | `~/.claude/slack-notify.sh` |
+| `slack-forward-prompt.sh` | `~/.claude/slack-forward-prompt.sh` |
+| `slack-read-thread.sh` | `~/.claude/slack-read-thread.sh` |
+| `slack-upload.sh` | `~/.claude/slack-upload.sh` |
+| `slack-claude.sh` | `~/.local/bin/slack-claude` |
+| `slack-claude-start.sh` | `~/.local/bin/slack-claude-start` |
+| `slack-bridge.md` | `~/.claude/rules/slack-bridge.md` |
 
 ## Documentation
 
 | File | Purpose |
 |------|---------|
-| `~/.claude/SPEC-slack-bridge.md` | Original single-session spec |
-| `~/.claude/SPEC-slack-multi-session.md` | Multi-session spec (to be implemented) |
-| `~/.claude/TOOLS.md` | Index of available tools |
+| `README.md` | User-facing setup and usage guide |
+| `INTERNALS.md` | Implementation details for developers |
 
 ## Configuration
 
 | File | Purpose |
 |------|---------|
 | `~/.claude/settings.json` | Claude Code hooks configuration |
-| `~/.claude/slack-bridge/config.json` | Bot tokens and allowed users (not in git) |
+| `config.json` | Bot tokens and allowed users (not in git) |
 
 ## Hooks Configuration
 
@@ -40,12 +35,15 @@ From `~/.claude/settings.json`:
 ```json
 {
   "hooks": {
+    "UserPromptSubmit": [
+      { "matcher": "", "hooks": [{ "command": "~/.claude/slack-forward-prompt.sh" }] }
+    ],
     "Notification": [
-      { "matcher": "idle_prompt", "hooks": [{ "command": "slack-notify.sh" }] },
-      { "matcher": "permission_prompt", "hooks": [{ "command": "slack-notify.sh" }] }
+      { "matcher": "idle_prompt", "hooks": [{ "command": "~/.claude/slack-notify.sh" }] },
+      { "matcher": "permission_prompt", "hooks": [{ "command": "~/.claude/slack-notify.sh" }] }
     ],
     "Stop": [
-      { "matcher": "", "hooks": [{ "command": "slack-notify.sh" }] }
+      { "matcher": "", "hooks": [{ "command": "~/.claude/slack-notify.sh" }] }
     ]
   }
 }
@@ -58,3 +56,4 @@ From `~/.claude/settings.json`:
 | `/tmp/claude-slack-thread-context.json` | Current thread context for hooks |
 | `/tmp/claude-slack-sessions.json` | Session tracking (multi-session) |
 | `/tmp/claude-slack-sessions.lock` | File lock for sessions.json |
+| `/tmp/slack-bridge.log` | Bridge log file |

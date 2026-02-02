@@ -31,40 +31,19 @@ Each Slack thread gets its own Claude Code session in a separate tmux window.
 
 ## Setup
 
-### Clone the Repository
+### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/dolezaljan/slack-claude-bridge.git ~/.claude/slack-bridge
 cd ~/.claude/slack-bridge
 ```
 
-### Quick Install
-
-After creating your Slack app (steps 1-6 below), run the install script:
-
-```bash
-cd ~/.claude/slack-bridge
-./install.sh
-```
-
-The script will:
-- Install npm dependencies
-- Prompt for your Slack credentials
-- Create symlinks for hooks and commands
-- Configure Claude Code hooks
-
-### Manual Setup
-
-If you prefer manual setup, follow these steps:
-
-### 1. Create Slack App
+### 2. Create Slack App
 
 1. Go to https://api.slack.com/apps → **Create New App** → **From scratch**
 2. Name it "Claude Code" and select your workspace
 
-### 2. Configure Bot Token Scopes
-
-Go to **OAuth & Permissions** → **Scopes** → **Bot Token Scopes**, add:
+**Configure Bot Token Scopes** (OAuth & Permissions → Bot Token Scopes):
 - `chat:write` - Send messages
 - `channels:history` - Read channel messages (for @mentions)
 - `im:history` - Read DMs
@@ -75,50 +54,44 @@ Go to **OAuth & Permissions** → **Scopes** → **Bot Token Scopes**, add:
 - `files:read` - Download file attachments
 - `files:write` - Upload files to Slack
 
-### 3. Enable Socket Mode
+**Enable Socket Mode** (Socket Mode → Enable):
+- Create an **App-Level Token** with `connections:write` scope
+- Copy the token (starts with `xapp-`)
 
-1. Go to **Socket Mode** → Enable
-2. Create an **App-Level Token** with `connections:write` scope
-3. Copy the token (starts with `xapp-`)
-
-### 4. Subscribe to Events
-
-Go to **Event Subscriptions** → Enable Events → **Subscribe to bot events**, add:
+**Subscribe to Events** (Event Subscriptions → Enable → Subscribe to bot events):
 - `message.im` - Direct messages
 - `app_mention` - @mentions in channels
 
-### 5. Install App to Workspace
+**Install App** (Install App → Install to Workspace):
+- Copy the **Bot User OAuth Token** (starts with `xoxb-`)
 
-1. Go to **Install App** → Install to Workspace
-2. Copy the **Bot User OAuth Token** (starts with `xoxb-`)
+**Get Your User ID**:
+- In Slack, click your profile → **⋮** → **Copy member ID**
 
-### 6. Get Your User ID
-
-In Slack, click your profile → **⋮** → **Copy member ID**
-
-### 7. Configure the Bridge
+### 3. Run Install Script
 
 ```bash
-cd ~/.claude/slack-bridge
-cp config.example.json config.json
+./install.sh
 ```
 
-Edit `config.json`:
-```json
-{
-  "botToken": "xoxb-your-bot-token",
-  "appToken": "xapp-your-app-level-token",
-  "allowedUsers": ["U12345678"],
-  "notifyChannel": "U12345678"
-}
+The script will prompt for your tokens and:
+- Install npm dependencies
+- Create `config.json` with your credentials
+- Create symlinks for hooks and commands
+- Configure Claude Code hooks in `~/.claude/settings.json`
+
+### 4. Start the Bridge
+
+```bash
+slack-claude-start
 ```
 
-- `botToken` - Bot User OAuth Token from step 5
-- `appToken` - App-Level Token from step 3
-- `allowedUsers` - Your Slack user ID(s) from step 6
-- `notifyChannel` - Fallback channel for notifications (use user ID for DMs)
+This creates tmux session `claude` with the bridge in window 0. Use `slack-claude-start --restart` to restart.
 
-Optional multi-session settings (defaults shown):
+### Configuration Options
+
+The install script creates `config.json`. Optional settings (defaults shown):
+
 ```json
 {
   "multiSession": {
@@ -131,57 +104,6 @@ Optional multi-session settings (defaults shown):
   }
 }
 ```
-
-### 8. Install Dependencies
-
-```bash
-cd ~/.claude/slack-bridge
-npm install
-```
-
-### 9. Setup Notification Hook
-
-Create a symlink for the Claude Code hook:
-
-```bash
-ln -s ~/.claude/slack-bridge/slack-notify.sh ~/.claude/slack-notify.sh
-```
-
-Add to `~/.claude/settings.json`:
-```json
-{
-  "hooks": {
-    "Notification": [
-      {
-        "matcher": "idle_prompt",
-        "hooks": [{ "type": "command", "command": "~/.claude/slack-notify.sh", "timeout": 10 }]
-      },
-      {
-        "matcher": "permission_prompt",
-        "hooks": [{ "type": "command", "command": "~/.claude/slack-notify.sh", "timeout": 10 }]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [{ "type": "command", "command": "~/.claude/slack-notify.sh", "timeout": 10 }]
-      }
-    ]
-  }
-}
-```
-
-### 10. Start the Bridge
-
-```bash
-cd ~/.claude/slack-bridge
-./start.sh
-```
-
-This will:
-- Create tmux session `claude` if needed
-- Start the bridge in window 0 named `bridge`
-- Show connection status and logs
 
 ## Usage
 
@@ -317,7 +239,7 @@ Claude sends status updates to the Slack thread:
 ## Troubleshooting
 
 **"No server running on /tmp/tmux..."**
-- Start tmux first: `tmux new -s claude` or use `./start.sh`
+- Run `slack-claude-start` to create the tmux session
 
 **Messages not being sent**
 - Check `!status` - verify bridge is connected
@@ -344,17 +266,28 @@ Claude sends status updates to the Slack thread:
 
 ```
 ~/.claude/slack-bridge/
-├── bridge.js           # Main bridge server
-├── slack-notify.sh     # Claude notification hook
-├── start.sh            # Convenience launcher
-├── config.json         # Your configuration (gitignored)
-├── config.example.json # Template configuration
-├── package.json        # Dependencies
-└── README.md           # This file
+├── bridge.js               # Main bridge server
+├── slack-notify.sh         # Hook: send notifications to Slack
+├── slack-forward-prompt.sh # Hook: forward user prompts to Slack
+├── slack-read-thread.sh    # Tool: read Slack thread history
+├── slack-upload.sh         # Tool: upload files to Slack
+├── slack-claude.sh         # Start Claude session from terminal
+├── slack-claude-start.sh   # Start bridge infrastructure
+├── slack-bridge.md         # Global Claude Code rules
+├── install.sh              # Installation script
+├── config.json             # Your configuration (gitignored)
+├── config.example.json     # Template configuration
+├── package.json            # Dependencies
+└── README.md               # This file
 
-~/.claude/
-├── slack-notify.sh     # Symlink → slack-bridge/slack-notify.sh
-└── settings.json       # Claude hooks configuration
+Symlinks (created by install.sh):
+~/.claude/slack-notify.sh         → slack-bridge/slack-notify.sh
+~/.claude/slack-forward-prompt.sh → slack-bridge/slack-forward-prompt.sh
+~/.claude/slack-read-thread.sh    → slack-bridge/slack-read-thread.sh
+~/.claude/slack-upload.sh         → slack-bridge/slack-upload.sh
+~/.claude/rules/slack-bridge.md   → slack-bridge/slack-bridge.md
+~/.local/bin/slack-claude         → slack-bridge/slack-claude.sh
+~/.local/bin/slack-claude-start   → slack-bridge/slack-claude-start.sh
 ```
 
 ## Git/SSH in tmux Sessions
@@ -397,3 +330,85 @@ gh auth setup-git
 - Also written to `/tmp/slack-bridge.log`
 - Session state: `/tmp/claude-slack-sessions.json`
 - Downloaded files: `/tmp/claude-slack-files/<threadTs>/`
+
+---
+
+## Appendix: Manual Setup
+
+If you prefer not to use `install.sh`, here's the manual process:
+
+### Install Dependencies
+
+```bash
+cd ~/.claude/slack-bridge
+npm install
+```
+
+### Create config.json
+
+```bash
+cp config.example.json config.json
+```
+
+Edit with your tokens:
+```json
+{
+  "botToken": "xoxb-your-bot-token",
+  "appToken": "xapp-your-app-level-token",
+  "allowedUsers": ["U12345678"],
+  "notifyChannel": "U12345678"
+}
+```
+
+### Create Symlinks
+
+```bash
+# Hook scripts (called by Claude Code)
+ln -s ~/.claude/slack-bridge/slack-notify.sh ~/.claude/slack-notify.sh
+ln -s ~/.claude/slack-bridge/slack-forward-prompt.sh ~/.claude/slack-forward-prompt.sh
+
+# Tool scripts (called by Claude)
+ln -s ~/.claude/slack-bridge/slack-read-thread.sh ~/.claude/slack-read-thread.sh
+ln -s ~/.claude/slack-bridge/slack-upload.sh ~/.claude/slack-upload.sh
+
+# Commands (in PATH)
+ln -s ~/.claude/slack-bridge/slack-claude.sh ~/.local/bin/slack-claude
+ln -s ~/.claude/slack-bridge/slack-claude-start.sh ~/.local/bin/slack-claude-start
+
+# Global Claude Code rules
+mkdir -p ~/.claude/rules
+ln -s ~/.claude/slack-bridge/slack-bridge.md ~/.claude/rules/slack-bridge.md
+```
+
+### Configure Claude Code Hooks
+
+Add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "~/.claude/slack-forward-prompt.sh", "timeout": 5 }]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "idle_prompt",
+        "hooks": [{ "type": "command", "command": "~/.claude/slack-notify.sh", "timeout": 10 }]
+      },
+      {
+        "matcher": "permission_prompt",
+        "hooks": [{ "type": "command", "command": "~/.claude/slack-notify.sh", "timeout": 10 }]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "~/.claude/slack-notify.sh", "timeout": 10 }]
+      }
+    ]
+  }
+}
+```
