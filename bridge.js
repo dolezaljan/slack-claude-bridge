@@ -1,10 +1,31 @@
 import Bolt from '@slack/bolt';
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, createWriteStream, rmSync, readdirSync } from 'fs';
 import { pipeline } from 'stream/promises';
 import { createHash } from 'crypto';
 
 const { App } = Bolt;
+
+// Handle uncaught exceptions (e.g., Slack socket-mode state machine errors)
+// Auto-restart after a brief delay
+process.on('uncaughtException', (err) => {
+  console.error(`[${new Date().toISOString()}] Uncaught exception: ${err.message}`);
+  console.error(err.stack);
+  console.log(`[${new Date().toISOString()}] Restarting in 5 seconds...`);
+  setTimeout(() => {
+    // Restart self
+    const args = process.argv.slice(1);
+    spawn(process.argv[0], args, {
+      stdio: 'inherit',
+      detached: true
+    }).unref();
+    process.exit(0);
+  }, 5000);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error(`[${new Date().toISOString()}] Unhandled rejection:`, reason);
+});
 
 // Configuration
 const CONFIG_DIR = process.env.HOME + '/.claude/slack-bridge';
