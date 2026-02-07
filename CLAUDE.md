@@ -20,6 +20,7 @@ SSH_AUTH_SOCK=/run/user/1000/gcr/ssh git push
 - `slack-upload.sh` - Upload files to Slack threads
 - `slack-claude-start.sh` - Start the bridge (symlinked to ~/.local/bin/)
 - `slack-bridge.md` - Global rules (symlinked to ~/.claude/rules/)
+- `slack-bridge.service` - systemd user service for autostart (symlinked to ~/.config/systemd/user/)
 
 ## Testing Changes
 

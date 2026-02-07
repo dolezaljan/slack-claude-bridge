@@ -319,6 +319,42 @@ fi
 
 echo ""
 
+# Systemd autostart (optional)
+SYSTEMD_LINK="$HOME/.config/systemd/user/slack-bridge.service"
+
+if command -v systemctl &> /dev/null && systemctl --user status &> /dev/null; then
+  echo -e "${BLUE}Auto-start on login (systemd)${NC}"
+  echo "  The bridge can be configured to start automatically when you log in."
+  echo "  This uses a systemd user service that runs slack-claude-start."
+  echo ""
+
+  if [[ -L "$SYSTEMD_LINK" ]] && systemctl --user is-enabled slack-bridge.service &> /dev/null; then
+    echo -e "  ${GREEN}✓${NC} Already enabled."
+    echo ""
+  else
+    echo -n "  Enable auto-start on login? [y/N]: "
+    read -r response
+    if [[ "$response" =~ ^[Yy]$ ]]; then
+      mkdir -p "$(dirname "$SYSTEMD_LINK")"
+      create_symlink "$SCRIPT_DIR/slack-bridge.service" "$SYSTEMD_LINK"
+      systemctl --user daemon-reload
+      systemctl --user enable slack-bridge.service
+      echo -e "  ${GREEN}✓${NC} Enabled. Bridge will start on next login."
+      echo "    Manage with: systemctl --user {start|stop|status|disable} slack-bridge"
+      AUTOSTART_ENABLED=true
+    else
+      echo "  Skipped. You can enable it later with:"
+      echo "    ln -s $SCRIPT_DIR/slack-bridge.service $SYSTEMD_LINK"
+      echo "    systemctl --user daemon-reload && systemctl --user enable slack-bridge"
+    fi
+    echo ""
+  fi
+else
+  echo -e "${YELLOW}Note:${NC} systemd user services not available. Auto-start on login not configured."
+  echo "  You can start the bridge manually with: slack-claude-start"
+  echo ""
+fi
+
 # Summary
 echo -e "${GREEN}"
 echo "============================================"
@@ -338,10 +374,17 @@ echo "  - ~/.claude/slack-read-thread.sh"
 echo "  - ~/.local/bin/slack-claude"
 echo "  - ~/.local/bin/slack-claude-start"
 echo "  - ~/.claude/rules/slack-bridge.md (global Claude Code rules)"
+if [[ "$AUTOSTART_ENABLED" == "true" ]]; then
+echo "  - ~/.config/systemd/user/slack-bridge.service (autostart)"
+fi
 echo ""
 echo -e "${BLUE}Next steps:${NC}"
 echo ""
+if [[ "$AUTOSTART_ENABLED" == "true" ]]; then
+echo "1. Start the bridge now (or it will start on next login):"
+else
 echo "1. Start the bridge (creates tmux session if needed):"
+fi
 echo "   slack-claude-start"
 echo ""
 echo "2. Send a DM to your bot in Slack to start a session!"

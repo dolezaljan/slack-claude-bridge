@@ -100,6 +100,30 @@ slack-claude-start
 
 This creates tmux session `claude` with the bridge in window 0. Use `slack-claude-start --restart` to restart.
 
+### 5. Auto-Start on Login (Optional)
+
+On systems with systemd (most Linux distributions), the install script offers to enable automatic startup when you log in. If you skipped it during install, you can enable it manually:
+
+```bash
+mkdir -p ~/.config/systemd/user
+ln -s ~/.claude/slack-bridge/slack-bridge.service ~/.config/systemd/user/slack-bridge.service
+systemctl --user daemon-reload
+systemctl --user enable slack-bridge
+```
+
+Manage the service:
+```bash
+systemctl --user start slack-bridge    # Start now
+systemctl --user stop slack-bridge     # Stop
+systemctl --user status slack-bridge   # Check status
+systemctl --user disable slack-bridge  # Disable autostart
+journalctl --user -u slack-bridge      # View startup logs
+```
+
+The service starts the bridge inside tmux (same as running `slack-claude-start` manually).
+
+> **Note**: To start at boot even without logging in, enable lingering: `loginctl enable-linger $USER`
+
 ### Configuration Options
 
 The install script creates `config.json`. Optional settings (defaults shown):
@@ -287,6 +311,7 @@ Claude sends status updates to the Slack thread:
 ├── slack-claude-start.sh   # Start bridge infrastructure
 ├── slack-bridge.md         # Global Claude Code rules
 ├── install.sh              # Installation script
+├── slack-bridge.service    # systemd user service (autostart)
 ├── config.json             # Your configuration (gitignored)
 ├── config.example.json     # Template configuration
 ├── package.json            # Dependencies
@@ -300,6 +325,9 @@ Symlinks (created by install.sh):
 ~/.claude/rules/slack-bridge.md   → slack-bridge/slack-bridge.md
 ~/.local/bin/slack-claude         → slack-bridge/slack-claude.sh
 ~/.local/bin/slack-claude-start   → slack-bridge/slack-claude-start.sh
+
+Optional (if autostart enabled):
+~/.config/systemd/user/slack-bridge.service → slack-bridge/slack-bridge.service
 ```
 
 ## Git/SSH in tmux Sessions

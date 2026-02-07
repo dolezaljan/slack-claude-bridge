@@ -1,0 +1,16 @@
+[Unit]
+Description=Claude Code Slack Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Source bash profile to get nvm/node in PATH, then run the start script
+ExecStart=/usr/bin/bash -lc 'exec %h/.local/bin/slack-claude-start'
+ExecStop=/usr/bin/bash -c 'pkill -f "node bridge.js"'
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
